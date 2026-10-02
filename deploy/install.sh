@@ -43,6 +43,38 @@ fi
 "$VENV_DIR/bin/pip" install --quiet -r "$BACKEND_DIR/requirements.txt"
 ok "Avhengigheter installert"
 
+# --------------------------------------------------------------- git
+# Agenten faar klone git-repoer inn i backend/projects/. Da maa git finnes.
+cmd "Sjekker git (trengs for at agenten kan klone repoer)"
+if command -v git >/dev/null 2>&1; then
+    ok "$(git --version)"
+else
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq
+        sudo apt-get install -y git >/dev/null
+        ok "git installert: $(git --version)"
+    else
+        warn "git mangler, og apt-get finnes ikke. Installer git manuelt, ellers kan ikke agenten klone."
+    fi
+fi
+
+# --------------------------------------------------------------- prosjektmappen
+# Agenten faar BARE lese/skrive/klone inne i backend/projects/. Er mappen laget
+# av root (f.eks. etter en manuell test med sudo), kan ikke tjenestebrukeren
+# skrive der - og da feiler bade kloning og fillagring.
+cmd "Sjekker skriverettigheter i $BACKEND_DIR/projects"
+mkdir -p "$BACKEND_DIR/projects"
+if [ -w "$BACKEND_DIR/projects" ]; then
+    ok "Prosjektmappen er skrivbar for $USER"
+else
+    sudo chown -R "$(id -u):$(id -g)" "$BACKEND_DIR/projects"
+    if [ -w "$BACKEND_DIR/projects" ]; then
+        ok "Rettighetene var feil - chown kjort, mappen er naa skrivbar"
+    else
+        warn "Kunne ikke rette rettighetene i $BACKEND_DIR/projects. Sjekk manuelt med: ls -ld $BACKEND_DIR/projects"
+    fi
+fi
+
 # --------------------------------------------------------------- Tailscale
 # Tailscale er en AVHENGIGHET: det er nettverket appen kobler seg til
 # serveren gjennom. Skriptet installerer det hvis det mangler.
@@ -114,6 +146,27 @@ if [ -n "$MISSING" ]; then
     warn "  printf 'GEMINI_API_KEY=<din nokkel>\\nDEEPSEEK_API_KEY=<din nokkel>\\n' >> $ENV_FILE"
 else
     ok "Begge AI-noklene finnes"
+fi
+
+# --------------------------------------------------------------- GitHub-token
+# Repoene er private. Baade 'git pull' paa serveren og agentens clone_repo
+# trenger en token for aa slippe inn.
+cmd "Sjekker GITHUB_TOKEN (trengs for private repoer)"
+GITHUB_TOKEN_VALUE="$(grep '^GITHUB_TOKEN=.\+' "$ENV_FILE" | head -n1 | cut -d= -f2- || true)"
+if [ -n "$GITHUB_TOKEN_VALUE" ]; then
+    ok "GITHUB_TOKEN finnes"
+    if command -v git >/dev/null 2>&1; then
+        # Gjoer at 'git pull' i repoet virker uten passordsporsmaal. Tokenen
+        # havner i ~/.gitconfig - samme bruker og maskin som .env.
+        git config --global url."https://x-access-token:${GITHUB_TOKEN_VALUE}@github.com/".insteadOf "https://github.com/"
+        ok "git bruker tokenen automatisk mot github.com (lagret i ~/.gitconfig)"
+    fi
+else
+    warn "GITHUB_TOKEN mangler i $ENV_FILE"
+    warn "  Private repoer kan ikke klones eller hentes uten den."
+    warn "  Lag en fine-grained PAT med 'Contents: Read' og legg den inn:"
+    warn "    printf 'GITHUB_TOKEN=<din token>\\n' >> $ENV_FILE"
+    warn "    bash deploy/install.sh     # aktiverer den ogsaa for git"
 fi
 
 # --------------------------------------------------------------- systemd

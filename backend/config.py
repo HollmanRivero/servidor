@@ -19,6 +19,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 API_TOKEN = os.environ.get("API_TOKEN", "").strip()
 
+# GitHub-token, slik at agenten kan klone PRIVATE repoer fra serveren.
+# Fine-grained PAT med "Contents: Read" paa repoet holder. Ligger kun i .env.
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+
 HOST = os.environ.get("HOST", "0.0.0.0").strip()
 PORT = int(os.environ.get("PORT", "8000"))
 

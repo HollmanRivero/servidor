@@ -49,7 +49,7 @@ sudo apt install -y python3 python3-venv python3-pip
 Repoet ligger på GitHub, så enklest er å klone det:
 
 ```bash
-git clone https://github.com/Salazar-Rivero-Smart-Things/servidor.git ~/Servidor_Super
+git clone https://github.com/HollmanRivero/servidor.git ~/Servidor_Super
 ```
 
 Alternativt med `rsync` hvis du står på en maskin som allerede har repoet:
@@ -93,7 +93,36 @@ printf 'GEMINI_API_KEY=ditt-nye\nDEEPSEEK_API_KEY=ditt-nye\n' >> .env
 sudo systemctl restart servidor-super
 ```
 
-### 6. Verifiser
+### 6. GitHub-token (repoene er private)
+
+Repoene ligger på `HollmanRivero/servidor` og `HollmanRivero/tech-ai-monkey`, og de er
+**private**. Da kan ingenting hentes anonymt — verken `git pull` på serveren eller
+agentens klone-verktøy.
+
+Lag en **fine-grained PAT** på <https://github.com/settings/personal-access-tokens/new>:
+
+- *Repository access*: velg `servidor` (og `tech-ai-monkey` hvis agenten skal klone den)
+- *Permissions* → *Repository permissions* → **Contents: Read-only**
+- Sett gjerne en utløpsdato
+
+Legg den i `.env` og kjør installasjonsskriptet på nytt:
+
+```bash
+cd ~/Servidor_Super
+printf 'GITHUB_TOKEN=ditt-token-her\n' >> backend/.env
+bash deploy/install.sh      # sjekker tokenen og setter opp git for deg
+sudo systemctl restart servidor-super
+```
+
+`install.sh` legger tokenen i `~/.gitconfig` (via `url.…insteadOf`), slik at vanlig
+`git pull` i repoet virker uten passordspørsmål. Agenten bruker samme token, men
+sender den som HTTP-header fra `backend/.env` — den havner aldri i kommandolinjen,
+i `.git/config` eller i loggene.
+
+Agenten kan klone repoer med verktøyet `clone_repo`. Klonene havner i
+`backend/projects/<navn>` og kan ikke skrive noe sted utenfor den mappen.
+
+### 7. Verifiser
 
 ```bash
 systemctl status servidor-super
@@ -116,7 +145,7 @@ curl -s localhost:8000/health | python3 -m json.tool
 
 Sjekk at `auth_required` er `true` og begge `*_key_configured` er `true`.
 
-### 7. Appen
+### 8. Appen
 
 Bygg APK-en (se `INTERN-NOTAT.md` hvis den finnes, ellers under), og installer.
 I appen, trykk tannhjulet og fyll inn:

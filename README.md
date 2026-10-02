@@ -97,7 +97,7 @@ tailscale ip -4      # -> 100.x.y.z
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip git
 
-git clone https://github.com/Salazar-Rivero-Smart-Things/servidor.git ~/Servidor_Super
+git clone https://github.com/HollmanRivero/servidor.git ~/Servidor_Super
 cd ~/Servidor_Super
 ```
 
@@ -117,6 +117,7 @@ Rellena estos valores:
 | `API_TOKEN` | Tú la inventas: `openssl rand -hex 32` |
 | `GEMINI_API_KEY` | <https://aistudio.google.com/apikey> |
 | `DEEPSEEK_API_KEY` | <https://platform.deepseek.com/api_keys> |
+| `GITHUB_TOKEN` | PAT con **Contents: Read** — solo si el agente va a clonar los repos privados |
 
 `API_TOKEN` es la clave compartida entre el móvil y el servidor: la app la envía en la
 cabecera `X-API-Token` en cada petición. **Debe ser idéntica en los dos lados.**
