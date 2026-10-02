@@ -9,10 +9,7 @@ SQL skrives med ?-plassholdere og oversettes til %s for PostgreSQL.
 """
 import os
 import sqlite3
-<<<<<<< HEAD
-=======
 import threading
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 
 from loguru import logger
 
@@ -98,12 +95,9 @@ class Database:
     def __init__(self, connection, backend: str):
         self.conn = connection
         self.backend = backend  # "postgres" eller "sqlite"
-<<<<<<< HEAD
-=======
         # Én lås for all DB-tilgang. SQLite-tilkoblinger kan ikke brukes fra
         # flere tråder samtidig, og FastAPI kjører endepunktene i trådpoolen.
         self._lock = threading.Lock()
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 
     def _sql(self, query: str) -> str:
         if self.backend == "postgres":
@@ -111,26 +105,6 @@ class Database:
         return query
 
     def execute(self, query: str, params: tuple = ()) -> None:
-<<<<<<< HEAD
-        cur = self.conn.cursor()
-        try:
-            cur.execute(self._sql(query), params)
-            self.conn.commit()
-        finally:
-            cur.close()
-
-    def fetchall(self, query: str, params: tuple = ()) -> list[dict]:
-        cur = self.conn.cursor()
-        try:
-            cur.execute(self._sql(query), params)
-            rows = cur.fetchall()
-            if not rows:
-                return []
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in rows]
-        finally:
-            cur.close()
-=======
         with self._lock:
             cur = self.conn.cursor()
             try:
@@ -151,7 +125,6 @@ class Database:
                 return [dict(zip(cols, row)) for row in rows]
             finally:
                 cur.close()
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 
     def fetchone(self, query: str, params: tuple = ()) -> dict | None:
         rows = self.fetchall(query, params)
@@ -164,13 +137,9 @@ _db: Database | None = None
 def _init_sqlite() -> Database:
     data_dir = config.BASE_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-<<<<<<< HEAD
-    conn = sqlite3.connect(data_dir / "memory.db")
-=======
     # check_same_thread=False + låsen i Database-klassen gjør det trygt at
     # FastAPI bruker tilkoblingen fra forskjellige worker-tråder.
     conn = sqlite3.connect(data_dir / "memory.db", check_same_thread=False)
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
     return Database(conn, "sqlite")
 
 

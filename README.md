@@ -50,13 +50,6 @@ accesible a través de Tailscale** — nada queda expuesto a internet.
 **Servidor:**
 - Ubuntu (o cualquier Linux basado en Debian)
 - Python 3.10 o superior (probado con 3.14)
-<<<<<<< HEAD
-- Cuenta de Tailscale
-
-**App Android:**
-- Android Studio, o JDK 17+ y el Android SDK
-- Android 7.0 (API 24) o superior
-=======
 - **Tailscale** (cliente oficial, `tailscale` en PATH) — *dependencia crítica: es la red por la que la app se conecta al servidor*. `install.sh` la instala sola si falta.
 - Cuenta de Tailscale (la app y el servidor deben estar en el mismo *tailnet*)
 
@@ -64,7 +57,6 @@ accesible a través de Tailscale** — nada queda expuesto a internet.
 - Android Studio, o JDK 17+ y el Android SDK
 - Android 7.0 (API 24) o superior
 - **App de Tailscale** en el móvil (Play Store), con la misma cuenta que el servidor — *dependencia crítica para llegar al servidor desde fuera*
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 
 ---
 

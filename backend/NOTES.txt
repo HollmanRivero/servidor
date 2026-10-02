@@ -90,23 +90,6 @@ F) Ver estado de todos los usuarios:
 4. LO QUE VAMOS A HACER A CONTINUACIÓN (Roadmap)
 --------------------------------------------------------------------------------
 
-<<<<<<< HEAD
-FASE 1: BACKEND (FastAPI - backend/main.py)
-[ ] Instalar librerías en el entorno virtual:
-    - psycopg[binary] (para conectar a Vercel Postgres)
-    - bcrypt (para verificar contraseñas)
-    - pyjwt (para emitir tokens de sesión JWT)
-[ ] Crear módulos auxiliares:
-    - database.py: conexión a Vercel Postgres usando DATABASE_URL.
-    - auth.py: verificación de hash y generación de JWT.
-[ ] Crear rutas de autenticación en main.py:
-    - POST /auth/login (recibe username + password -> devuelve token JWT).
-    - POST /auth/register (registro libre si se desea permitir).
-[ ] Actualizar middleware de seguridad:
-    - Comprobar si el usuario está baneado (is_banned == TRUE -> rechazar con 403).
-    - Comprobar si su suscripción está activa o si es VIP/Admin (rechazar con 402 si venció).
-    - Mantener compatibilidad con el token maestro X-API-Token actual.
-=======
 FASE 1: BACKEND (FastAPI - backend/main.py) - FERDIG OG TESTET 02.10.2026
 [x] Instalar librerías en el entorno virtual:
     - psycopg[binary] (para conectar a Vercel Postgres)
@@ -124,7 +107,6 @@ FASE 1: BACKEND (FastAPI - backend/main.py) - FERDIG OG TESTET 02.10.2026
     - Mantener compatibilidad con el token maestro X-API-Token actual.
 [x] FIX: database.py -> lock + check_same_thread=False para SQLite
     (FastAPI usa la conexión desde varios hilos; sin el fix daba 500 en /auth/*)
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 
 FASE 2: APLICACIÓN ANDROID (Jetpack Compose - android_app/)
 [ ] Crear LoginScreen.kt:

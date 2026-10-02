@@ -10,36 +10,27 @@ Maskinen som skal være server ("arbeidshesten") må ha:
 - Ubuntu (eller annen Debian-basert Linux)
 - Python 3.10 eller nyere – **ikke eldre**, og ikke pinn gamle `pydantic`-versjoner
 - Nettverk mot resten av tailnettet
-<<<<<<< HEAD
-=======
 - **Tailscale** (avhengighet på Linux-serveren): `tailscale`-daemonen fra
   `curl -fsSL https://tailscale.com/install.sh | sh`.
   Dette er nettverket appen kobler seg til serveren gjennom.
   `install.sh` installerer den automatisk hvis den mangler – du trenger bare
   logge inn med `sudo tailscale up`.
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 
 ## Steg for steg
 
 ### 1. Tailscale på den nye maskinen
 
-<<<<<<< HEAD
-=======
 `install.sh` installerer Tailscale selv hvis den mangler, men du kan også gjøre
 det manuelt først:
 
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up          # åpner nettleser for innlogging
 tailscale ip -4            # <- denne IP-en skal i appen
 ```
 
-<<<<<<< HEAD
-=======
 Logg inn med **samme konto som i appen** – da havner begge i samme tailnett.
 
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 Skriv gjerne ned IP-en med en gang. Den er `100.x.y.z`.
 
 **Rydd opp i det gamle:** på den forrige maskinen, kjør `sudo tailscale logout`, og
@@ -55,20 +46,6 @@ sudo apt install -y python3 python3-venv python3-pip
 
 ### 3. Få repoet over til maskinen
 
-<<<<<<< HEAD
-Repoet er ikke på GitHub, så bruk `rsync` fra maskinen du står på nå:
-
-```bash
-rsync -av --exclude '.venv' --exclude 'build' --exclude '.gradle' \
-      ~/Dokumenter/MyGits/Servidor_Super/ bruker@ny-maskin:~/Servidor_Super/
-```
-
-Byggemappene `.venv` og `build/` er maskinspesifikke og skal ikke kopieres –
-de lages på nytt av installasjonsskriptet.
-
-Alternativt kan du `git init` i repoet og pushe til et privat repo. Det gir deg
-i tillegg sporbarhet, som er verdt mye når du lurer på hva som har endret seg.
-=======
 Repoet ligger på GitHub, så enklest er å klone det:
 
 ```bash
@@ -84,7 +61,6 @@ rsync -av --exclude '.venv' --exclude 'build' --exclude '.gradle' --exclude 'bac
 
 Byggemappene `.venv` og `build/` og den lokale databasen (`backend/data/`) er
 maskinspesifikke og skal ikke kopieres – de lages på nytt av installasjonsskriptet.
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 
 ### 4. Kjør installasjonsskriptet
 
@@ -96,20 +72,12 @@ bash deploy/install.sh
 Det gjør alt:
 
 1. lager `.venv` og installerer `backend/requirements.txt`
-<<<<<<< HEAD
-2. lager `backend/.env` hvis den mangler, og **genererer en ny `API_TOKEN`**
-3. skriver en systemd-tjeneste `servidor-super` med riktige stier
-4. starter tjenesten og setter den til å starte ved boot
-5. åpner port 8000 **kun på `tailscale0`** hvis `ufw` er aktiv
-6. skriver ut Tailscale-IP-en, API-tokenen og hva du skal skrive i appen
-=======
 2. **installerer Tailscale hvis den mangler** og sjekker at den er innlogget
 3. lager `backend/.env` hvis den mangler, og **genererer en ny `API_TOKEN`**
 4. skriver en systemd-tjeneste `servidor-super` med riktige stier
 5. starter tjenesten og setter den til å starte ved boot
 6. åpner port 8000 **kun på `tailscale0`** hvis `ufw` er aktiv
 7. skriver ut Tailscale-IP-en, API-tokenen og hva du skal skrive i appen
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 
 ### 5. Legg inn AI-nøklene
 

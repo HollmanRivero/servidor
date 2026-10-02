@@ -43,8 +43,6 @@ fi
 "$VENV_DIR/bin/pip" install --quiet -r "$BACKEND_DIR/requirements.txt"
 ok "Avhengigheter installert"
 
-<<<<<<< HEAD
-=======
 # --------------------------------------------------------------- Tailscale
 # Tailscale er en AVHENGIGHET: det er nettverket appen kobler seg til
 # serveren gjennom. Skriptet installerer det hvis det mangler.
@@ -69,7 +67,6 @@ case "$TS_STATE" in
         ok "Tailscale er koblet til tailnettet" ;;
 esac
 
->>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
 # --------------------------------------------------------------- .env
 cmd "Sjekker $ENV_FILE"
 [ -f "$ENV_FILE" ] || : > "$ENV_FILE"
