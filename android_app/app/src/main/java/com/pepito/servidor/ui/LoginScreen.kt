@@ -1,0 +1,208 @@
+package com.pepito.servidor.ui
+
+import android.content.Context
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
+import com.pepito.servidor.network.LoginRequest
+import com.pepito.servidor.network.RegisterRequest
+import com.pepito.servidor.network.RetrofitClient
+import com.pepito.servidor.ui.theme.DarkBackground
+import com.pepito.servidor.ui.theme.LightText
+import com.pepito.servidor.ui.theme.NeonBlue
+import kotlinx.coroutines.launch
+import retrofit2.HttpException
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LoginScreen(onLoggedIn: () -> Unit) {
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var isRegister by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var showSettings by remember { mutableStateOf(false) }
+    var tempIp by remember { mutableStateOf(RetrofitClient.BASE_URL) }
+    var tempToken by remember { mutableStateOf(RetrofitClient.API_TOKEN) }
+
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("server_prefs", Context.MODE_PRIVATE) }
+    val scope = rememberCoroutineScope()
+
+    fun doAuth() {
+        if (username.isBlank() || password.isBlank()) {
+            error = "Fyll inn brukernavn og passord"
+            return
+        }
+        isLoading = true
+        error = null
+        scope.launch {
+            try {
+                val token: String
+                val name: String
+                if (isRegister) {
+                    RetrofitClient.api.register(RegisterRequest(username.trim(), password))
+                    val resp = RetrofitClient.api.login(LoginRequest(username.trim(), password))
+                    token = resp.token
+                    name = resp.user?.username ?: username.trim()
+                } else {
+                    val resp = RetrofitClient.api.login(LoginRequest(username.trim(), password))
+                    token = resp.token
+                    name = resp.user?.username ?: username.trim()
+                }
+                RetrofitClient.JWT_TOKEN = token
+                prefs.edit()
+                    .putString("auth_token", token)
+                    .putString("username", name)
+                    .apply()
+                onLoggedIn()
+            } catch (e: HttpException) {
+                error = when (e.code()) {
+                    401 -> "Feil brukernavn eller passord"
+                    403 -> "Kontoen er bannet"
+                    409 -> "Brukernavnet er allerede i bruk"
+                    else -> "Serveren svarte med feil ${e.code()}"
+                }
+            } catch (e: Exception) {
+                error = "Kunne ikke nå serveren: ${e.message}"
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Super-Server", fontWeight = FontWeight.Bold, color = LightText) },
+                actions = {
+                    IconButton(onClick = {
+                        tempIp = RetrofitClient.BASE_URL
+                        tempToken = RetrofitClient.API_TOKEN
+                        showSettings = true
+                    }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Innstillinger", tint = LightText)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBackground)
+            )
+        },
+        containerColor = DarkBackground
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = if (isRegister) "Lag ny bruker" else "Logg inn",
+                color = LightText,
+                style = MaterialTheme.typography.headlineSmall
+            )
+            Spacer(modifier = Modifier.height(24.dp))
+
+            OutlinedTextField(
+                value = username,
+                onValueChange = { username = it },
+                label = { Text("Brukernavn") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Passord") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            if (error != null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(error!!, color = Color(0xFFFF5252))
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+            Button(
+                onClick = { doAuth() },
+                enabled = !isLoading,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (isLoading) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                } else {
+                    Text(if (isRegister) "Registrer" else "Logg inn")
+                }
+            }
+
+            TextButton(onClick = { isRegister = !isRegister; error = null }) {
+                Text(
+                    if (isRegister) "Har du konto? Logg inn" else "Ingen konto? Registrer deg",
+                    color = NeonBlue
+                )
+            }
+        }
+    }
+
+    if (showSettings) {
+        AlertDialog(
+            onDismissRequest = { showSettings = false },
+            title = { Text("Konfigurer server") },
+            text = {
+                Column {
+                    Text("URL til serveren (f.eks. http://100.123.119.29:8000)")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextField(
+                        value = tempIp,
+                        onValueChange = { tempIp = it },
+                        label = { Text("URL del Servidor") },
+                        singleLine = true
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Master-token (API_TOKEN fra backend/.env) - valgfri for admin")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextField(
+                        value = tempToken,
+                        onValueChange = { tempToken = it },
+                        label = { Text("X-API-Token") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    RetrofitClient.BASE_URL = tempIp
+                    RetrofitClient.API_TOKEN = tempToken
+                    prefs.edit()
+                        .putString("server_ip", tempIp)
+                        .putString("api_token", tempToken.trim())
+                        .apply()
+                    showSettings = false
+                }) {
+                    Text("Lagre")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSettings = false }) {
+                    Text("Avbryt")
+                }
+            }
+        )
+    }
+}

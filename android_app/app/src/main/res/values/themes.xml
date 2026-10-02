@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.Servidor" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <style name="Theme.ServidorGemini" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <style name="Theme.ServidorSuperAI" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

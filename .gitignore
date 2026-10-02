@@ -1,0 +1,59 @@
+# ------------------------------------------------------------------
+# SECRETOS - NUNCA deben llegar a GitHub
+# ------------------------------------------------------------------
+# OJO: .env.* se ignora, pero .env.example SI se sube al repo.
+# Dejalo siempre con valores VACIOS. Nunca pegues una clave real ahi.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets.properties
+google-services.json
+
+# ------------------------------------------------------------------
+# Python
+# ------------------------------------------------------------------
+.venv/
+.venv*/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ------------------------------------------------------------------
+# Builds (especificos de cada maquina, se regeneran solos)
+# ------------------------------------------------------------------
+build/
+.gradle/
+.kotlin/
+gradle-app.setting
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.hprof
+*.keystore
+*.jks
+
+# ------------------------------------------------------------------
+# Contenido / runtime del servidor
+# ------------------------------------------------------------------
+backend/projects/
+backend/data/
+
+# ------------------------------------------------------------------
+# IDE y sistema
+# ------------------------------------------------------------------
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+*.log

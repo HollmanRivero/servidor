@@ -1,0 +1,154 @@
+================================================================================
+                    SUPER-SERVER: PLAN DE TRABAJO & NOTAS
+================================================================================
+Fecha: 22 de Septiembre, 2026
+Ubicación del proyecto: Servidor_Super/
+
+--------------------------------------------------------------------------------
+1. RESUMEN DEL SISTEMA
+--------------------------------------------------------------------------------
+Estamos construyendo un sistema de autenticación y control de acceso para el 
+Super-Server (FastAPI + Android App) con base de datos en Vercel Postgres.
+
+Modelo comercial & control:
+- Modelo: Suscripción anual de 30 € ("Peace Pass").
+- Control de Paz: Poder de baneo instantáneo (Ban Hammer) con un comando SQL.
+- Amigos: Capacidad de agregarlos manualmente por SQL, asignarles contraseña,
+  darles 1 año de acceso (30€) o acceso VIP Gratuito de por vida.
+
+
+--------------------------------------------------------------------------------
+2. BASE DE DATOS (Vercel Postgres)
+--------------------------------------------------------------------------------
+Archivos creados en el repositorio:
+- schema.sql         -> Define tablas: users, subscriptions, access_logs.
+- admin_queries.sql  -> Comandos rápidos para agregar amigos, banear y consultar.
+
+Pasos para inicializar Vercel Postgres:
+1. Ir a vercel.com -> Storage -> tu base de datos Postgres -> pestaña 'SQL'.
+2. Ejecutar la extensión de contraseñas:
+     CREATE EXTENSION IF NOT EXISTS pgcrypto;
+     CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+3. Pegar y ejecutar el contenido de 'backend/schema.sql'.
+4. Copiar la variable DATABASE_URL de Vercel y guardarla en 'backend/.env':
+     DATABASE_URL="postgres://default:xxx@ep-xxx.vercel-storage.com:5432/verceldb?sslmode=require"
+
+
+--------------------------------------------------------------------------------
+3. COMANDOS MANUALES DE ADMINISTRADOR (Cheat-Sheet)
+--------------------------------------------------------------------------------
+
+A) Agregar un amigo (30 € / 1 Año de acceso):
+   WITH new_friend AS (
+       INSERT INTO users (username, password_hash, role, is_vip, friend_notes)
+       VALUES ('nombre_amigo', crypt('su_password', gen_salt('bf', 10)), 'user', FALSE, 'Nota opcional')
+       RETURNING id
+   )
+   INSERT INTO subscriptions (user_id, plan_name, price_eur, status, started_at, expires_at, notes)
+   SELECT id, 'Annual Peace Pass', 30.00, 'active', NOW(), NOW() + INTERVAL '1 year', 'Pagó 30€'
+   FROM new_friend;
+
+B) Agregar un amigo VIP (Gratis de por vida):
+   WITH vip AS (
+       INSERT INTO users (username, password_hash, role, is_vip, friend_notes)
+       VALUES ('mejor_amigo', crypt('pass_vip', gen_salt('bf', 10)), 'user', TRUE, 'Amigo VIP')
+       RETURNING id
+   )
+   INSERT INTO subscriptions (user_id, plan_name, price_eur, status, started_at, expires_at, notes)
+   SELECT id, 'VIP Friend Pass', 0.00, 'active', NOW(), NOW() + INTERVAL '100 years', 'VIP Gratis'
+   FROM vip;
+
+C) El Ban Hammer (Bloqueo instantáneo con error 403):
+   UPDATE users 
+   SET is_banned = TRUE, ban_reason = 'Disturbó mi paz. Que lo piense dos veces.' 
+   WHERE username = 'usuario_pesado';
+
+D) Desbanear / Perdonar:
+   UPDATE users 
+   SET is_banned = FALSE, ban_reason = NULL, banned_at = NULL 
+   WHERE username = 'usuario_pesado';
+
+E) Cambiar o resetear contraseña de un amigo:
+   UPDATE users 
+   SET password_hash = crypt('nueva_password', gen_salt('bf', 10)) 
+   WHERE username = 'nombre_amigo';
+
+F) Ver estado de todos los usuarios:
+   SELECT u.username, u.friend_notes,
+          CASE 
+              WHEN u.is_banned THEN 'BANEADO (' || COALESCE(u.ban_reason,'') || ')'
+              WHEN u.role = 'admin' THEN 'ADMIN'
+              WHEN u.is_vip THEN 'VIP (Gratis)'
+              WHEN s.expires_at > NOW() THEN 'ACTIVO (Vence: ' || TO_CHAR(s.expires_at, 'YYYY-MM-DD') || ')'
+              ELSE 'EXPIRADO / IMPAGO'
+          END AS estado
+   FROM users u
+   LEFT JOIN subscriptions s ON u.id = s.user_id;
+
+
+--------------------------------------------------------------------------------
+4. LO QUE VAMOS A HACER A CONTINUACIÓN (Roadmap)
+--------------------------------------------------------------------------------
+
+<<<<<<< HEAD
+FASE 1: BACKEND (FastAPI - backend/main.py)
+[ ] Instalar librerías en el entorno virtual:
+    - psycopg[binary] (para conectar a Vercel Postgres)
+    - bcrypt (para verificar contraseñas)
+    - pyjwt (para emitir tokens de sesión JWT)
+[ ] Crear módulos auxiliares:
+    - database.py: conexión a Vercel Postgres usando DATABASE_URL.
+    - auth.py: verificación de hash y generación de JWT.
+[ ] Crear rutas de autenticación en main.py:
+    - POST /auth/login (recibe username + password -> devuelve token JWT).
+    - POST /auth/register (registro libre si se desea permitir).
+[ ] Actualizar middleware de seguridad:
+    - Comprobar si el usuario está baneado (is_banned == TRUE -> rechazar con 403).
+    - Comprobar si su suscripción está activa o si es VIP/Admin (rechazar con 402 si venció).
+    - Mantener compatibilidad con el token maestro X-API-Token actual.
+=======
+FASE 1: BACKEND (FastAPI - backend/main.py) - FERDIG OG TESTET 02.10.2026
+[x] Instalar librerías en el entorno virtual:
+    - psycopg[binary] (para conectar a Vercel Postgres)
+    - bcrypt (para verificar contraseñas)
+    - pyjwt (para emitir tokens de sesión JWT)
+[x] Crear módulos auxiliares:
+    - database.py: conexión a Vercel Postgres usando DATABASE_URL.
+    - auth.py: verificación de hash y generación de JWT.
+[x] Crear rutas de autenticación en main.py:
+    - POST /auth/login (recibe username + password -> devuelve token JWT).
+    - POST /auth/register (el primer usuario se convierte en admin).
+[x] Actualizar middleware de seguridad:
+    - Comprobar si el usuario está baneado (is_banned == TRUE -> 403).
+    - Comprobar si su suscripción está activa o si es VIP/Admin (402 si venció).
+    - Mantener compatibilidad con el token maestro X-API-Token actual.
+[x] FIX: database.py -> lock + check_same_thread=False para SQLite
+    (FastAPI usa la conexión desde varios hilos; sin el fix daba 500 en /auth/*)
+>>>>>>> 465ea2342a392fafbd129a4f7e728ec8af8b9e62
+
+FASE 2: APLICACIÓN ANDROID (Jetpack Compose - android_app/)
+[ ] Crear LoginScreen.kt:
+    - Pantalla de inicio de sesión con campos de Usuario y Contraseña.
+    - Botón para iniciar sesión y guardar token en SharedPreferences.
+    - Ícono de configuración (engranaje) para ajustar URL del servidor si es necesario.
+[ ] Modificar MainActivity.kt:
+    - Si existe sesión activa -> ir directo a "dashboard".
+    - Si no existe sesión -> mostrar "login".
+[ ] Modificar DashboardScreen.kt:
+    - Mostrar nombre del usuario conectado en la barra superior.
+    - Agregar botón de Cerrar Sesión (Logout) que limpie credenciales y vuelva a login.
+    - Manejar mensajes de error claros si un usuario es baneado (403) o venció su cuota (402).
+
+
+--------------------------------------------------------------------------------
+5. DETALLES PENDIENTES DEL SERVIDOR ACTUAL
+--------------------------------------------------------------------------------
+- Tailscale en Ubuntu: Actualmente está en estado 'NeedsLogin'.
+  Para reactivarlo y obtener la IP del servidor en el tailnet:
+    sudo tailscale up
+    tailscale ip -4
+
+- Corrección en backend/.env:
+  Hay un error tipográfico en GEMINI_APY_KEY y un token concatenado al final.
+  Se debe corregir a GEMINI_API_KEY para habilitar Gemini en el endpoint /health.
+================================================================================

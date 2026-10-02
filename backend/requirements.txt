@@ -1,0 +1,23 @@
+# Nettverksrammeverk
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+
+# System og konfigurasjon
+psutil>=6.0
+python-dotenv>=1.0
+pydantic>=2.9,<3.0
+loguru>=0.7
+
+# Database og planlegging (agent + minne + daglig jobb)
+psycopg[binary]>=3.2,<4.0
+APScheduler>=3.10,<4.0
+
+# Autentisering (Fase 1: login/register med bcrypt + JWT)
+bcrypt>=4.1,<5.0
+PyJWT>=2.8,<3.0
+
+# MERK: ikke pinn eksakte versjoner her. Python 3.14 har ikke hjul for gamle
+# pydantic-core-versjoner (f.eks. pydantic==2.9.2 -> pydantic-core==2.23.4),
+# og da feiler "pip install -r requirements.txt" med
+# "No matching distribution found for pydantic-core==2.23.4".
+# Bruk >= ,<  slik at pip velger en versjon som passer Python-versjonen din.
