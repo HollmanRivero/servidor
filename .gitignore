@@ -12,6 +12,11 @@
 secrets.properties
 google-services.json
 
+# Filer med ekte nokler som ikke heter .env (f.eks. Neon-env-eksport).
+# backend/nvidia inneholdt API_TOKEN, Gemini/DeepSeek-nokler og Neon-passord.
+backend/nvidia
+backend/nvidia.*
+
 # ------------------------------------------------------------------
 # Python
 # ------------------------------------------------------------------
