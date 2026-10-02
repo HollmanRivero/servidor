@@ -166,7 +166,7 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
             title = { Text("Konfigurer server") },
             text = {
                 Column {
-                    Text("URL til serveren (f.eks. http://100.123.119.29:8000)")
+                    Text("URL til serveren (f.eks. http://100.68.2.32:8000)")
                     Spacer(modifier = Modifier.height(8.dp))
                     TextField(
                         value = tempIp,

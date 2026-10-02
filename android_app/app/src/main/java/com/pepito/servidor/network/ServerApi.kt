@@ -178,7 +178,8 @@ interface ServerApiService {
 }
 
 object RetrofitClient {
-    private var _baseUrl = "http://100.123.119.29:8000/"
+    // Standard server (Tailscale): smart-things-hesr. Kan overstyres i appens innstillinger.
+    private var _baseUrl = "http://100.68.2.32:8000/"
     var BASE_URL: String
         get() = _baseUrl
         set(value) {

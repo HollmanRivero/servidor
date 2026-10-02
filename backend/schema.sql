@@ -6,6 +6,10 @@
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- Trengs for crypt()/gen_salt() i admin_queries.sql (bcrypt-hash fra SQL).
+-- Python-koden bruker bcrypt selv og er kompatibel med disse hash-ene.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- 1. USERS TABLE
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

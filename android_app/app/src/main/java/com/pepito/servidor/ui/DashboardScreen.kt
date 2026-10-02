@@ -206,7 +206,7 @@ fun DashboardScreen(
                         title = { Text("Configurar Servidor") },
                         text = {
                             Column {
-                                Text("Introduce la IP o dominio del servidor (ej: http://100.123.119.29:8000)")
+                                Text("Introduce la IP o dominio del servidor (ej: http://100.68.2.32:8000)")
                                 Spacer(modifier = Modifier.height(8.dp))
                                 TextField(
                                     value = tempIp,

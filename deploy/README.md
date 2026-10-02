@@ -164,6 +164,65 @@ bare metal eller virtualisert. Men noen VM-spesifikke ting er verdt å sjekke:
   slik den var da – inkludert en eventuelt gammel versjon av koden. Det er den ene
   mekanismen som faktisk kan forklare at filer «endrer seg tilbake» av seg selv.
 
+## Oppdatere en server som allerede kjører
+
+Gjør dette på serveren hver gang koden har endret seg:
+
+```bash
+cd ~/Servidor_Super
+git pull                                   # hent nyeste kode
+.venv/bin/pip install -r backend/requirements.txt   # nye/endrede pakker
+sudo systemctl restart servidor-super      # start på nytt
+systemctl status servidor-super            # skal stå "active (running)"
+journalctl -u servidor-super -n 30         # se feil hvis den ikke starter
+```
+
+Verifiser at den svarer:
+
+```bash
+curl -s localhost:8000/health | python3 -m json.tool
+```
+
+### Database: SQLite eller PostgreSQL/Neon
+
+Serveren trenger **ingen** ekstern database for å kjøre – uten `DATABASE_URL` bruker
+den en lokal SQLite-fil i `backend/data/memory.db`. Registrering, login og abonnement
+fungerer da også, men dataene ligger kun på den maskinen.
+
+Vil du ha PostgreSQL (Neon/Vercel), legg linjen under i `backend/.env` på serveren og
+kjør `sudo systemctl restart servidor-super`:
+
+```
+DATABASE_URL=postgresql://bruker:passord@vert/db?sslmode=require
+```
+
+Første oppstart oppretter tabellene automatisk. Vil du opprette dem manuelt i Neon,
+kjør innholdet i `backend/schema.sql` i Neon-konsollen først. Nøkkelen ligger kun i
+`.env` – legg den aldri i Git.
+
+Etter at `DATABASE_URL` er lagt inn, kan du verifisere koblingen:
+
+```bash
+cd ~/Servidor_Super/backend
+../.venv/bin/python check_db.py
+```
+
+Skriptet viser vertsnavnet (aldri passordet), lister tabellene og sier hvor mange
+brukere som finnes. Skriv `python check_db.py` i stedet hvis venv-en er aktivert.
+Tabellen `users` skal alltid være der; er den borte, lager neste oppstart den på nytt.
+
+### Sjekk at auth faktisk virker
+
+```bash
+curl -s -X POST localhost:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"testbruker","password":"hemmelig123"}'
+```
+
+- `{"id":...,"username":"testbruker","role":"admin"}` → alt OK (første bruker blir admin)
+- `409` → brukernavnet finnes allerede
+- `500` → databasen feiler; se `journalctl -u servidor-super -n 30`
+
 ## Feilsøking
 
 | Symptom | Sjekk |
