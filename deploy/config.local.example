@@ -1,0 +1,45 @@
+# ------------------------------------------------------------------
+# deploy/config.local  -  ÉN fil å fylle ut på ny maskin, resten går automatisk.
+#
+#   cp deploy/config.local.example deploy/config.local
+#   nano deploy/config.local
+#   bash deploy/install.sh
+#
+# Filen er gitignorert (se .gitignore) og skal ALDRI i Git.
+# Alt som står tomt her blir generert automatisk eller hoppet over.
+# ------------------------------------------------------------------
+
+# --- AI-nøkler (limes inn her én gang) ---
+# Gemini:   https://aistudio.google.com/apikey
+GEMINI_API_KEY=
+# DeepSeek: https://platform.deepseek.com/api_keys
+DEEPSEEK_API_KEY=
+
+# --- Tech-AI (tech-ai.tech) Bygge-Agent (valgfritt) ---
+TECH_AI_API_URL=
+TECH_AI_API_KEY=
+
+# --- Delt token mellom server og mobilapp ---
+# Tom = genereres automatisk (eller skriv f.eks. et eget passord).
+API_TOKEN=
+
+# --- Port (IP hentes automatisk fra Tailscale) ---
+PORT=8000
+
+# --- Tailscale ---
+# Hostname maskinen får i tailnettet.
+TAILSCALE_HOSTNAME=servidor-super
+# Valgfritt: auth key fra https://login.tailscale.com/admin/settings/keys
+# Lar skriptet koble til automatisk, uten nettleser.
+TAILSCALE_AUTHKEY=
+# yes = lytt KUN på Tailscale-adressen (anbefalt: usynlig fra LAN).
+BIND_TAILSCALE_ONLY=no
+
+# --- Avansert: lås grensesnittet manuelt ---
+# HOST=100.x.y.z overstyrer BIND_TAILSCALE_ONLY.
+HOST=
+
+# --- AI-agentenes shell-tilgang ---
+# yes = Gemini/DeepSeek/Tech-AI får kjøre shell-kommandoer og bygge prosjekter
+# inne i backend/projects/.
+ENABLE_AGENT_SHELL=yes

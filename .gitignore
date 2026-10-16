@@ -6,6 +6,8 @@
 .env
 .env.*
 !.env.example
+deploy/config.local
+deploy/app_config.json
 *.pem
 *.key
 *.p12
@@ -62,3 +64,4 @@ backend/data/
 .DS_Store
 Thumbs.db
 *.log
+

@@ -1,6 +1,7 @@
 package com.pepito.servidor.network
 
 import com.google.gson.annotations.SerializedName
+import com.pepito.servidor.BuildConfig
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -183,12 +184,15 @@ object RetrofitClient {
     var BASE_URL: String
         get() = _baseUrl
         set(value) {
-            _baseUrl = if (value.endsWith("/")) value else "$value/"
-            _api = null // Reset api to recreate with new URL
+            val normalized = normalizeBaseUrl(value)
+            if (normalized.isNotEmpty()) {
+                _baseUrl = normalized
+                _api = null // Reset api to recreate with new URL
+            }
         }
 
     // Delt hemmelighet fra backend/.env (API_TOKEN). Ma vaere identisk paa begge sider.
-    private var _apiToken = ""
+    private var _apiToken: String = BuildConfig.API_TOKEN.trim()
     var API_TOKEN: String
         get() = _apiToken
         set(value) {
@@ -207,6 +211,9 @@ object RetrofitClient {
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(600, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val builder = chain.request().newBuilder()
                 if (_jwtToken.isNotEmpty()) {

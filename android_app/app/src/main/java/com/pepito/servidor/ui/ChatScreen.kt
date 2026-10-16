@@ -1,7 +1,9 @@
 package com.pepito.servidor.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,6 +30,8 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
     var selectedAI by remember { mutableStateOf("Gemini") }
     // true = begge jobber sammen: den valgte svarer, den andre kontrollerer og retter
     var collaborateMode by remember { mutableStateOf(false) }
+    // true = agenten kjorer kommandoer paa serveren (krever ENABLE_AGENT_SHELL=1)
+    var agentMode by remember { mutableStateOf(false) }
     var messages by remember { mutableStateOf(listOf(
         ChatMessage("Hei! Hvilken AI vil du prate med i dag?", false, "System")
     )) }
@@ -133,31 +137,46 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(8.dp),
                 horizontalArrangement = Arrangement.Center
             ) {
                 FilterChip(
-                    selected = selectedAI == "Gemini" && !collaborateMode,
+                    selected = selectedAI == "Gemini" && !collaborateMode && !agentMode,
                     onClick = {
                         selectedAI = "Gemini"
                         collaborateMode = false
+                        agentMode = false
                     },
                     label = { Text("Gemini") }
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 FilterChip(
-                    selected = selectedAI == "DeepSeek" && !collaborateMode,
+                    selected = selectedAI == "DeepSeek" && !collaborateMode && !agentMode,
                     onClick = {
                         selectedAI = "DeepSeek"
                         collaborateMode = false
+                        agentMode = false
                     },
                     label = { Text("DeepSeek") }
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 FilterChip(
                     selected = collaborateMode,
-                    onClick = { collaborateMode = true },
+                    onClick = {
+                        collaborateMode = true
+                        agentMode = false
+                    },
                     label = { Text("🤝 Begge") }
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                FilterChip(
+                    selected = agentMode,
+                    onClick = {
+                        agentMode = true
+                        collaborateMode = false
+                    },
+                    label = { Text("🛠 Agent") }
                 )
             }
             
@@ -201,7 +220,11 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                 }
                 if (isTyping) {
                     item {
-                        val whoTalks = if (collaborateMode) "Gemini og DeepSeek samarbeider" else selectedAI
+                        val whoTalks = when {
+                            agentMode -> "${selectedAI}-agenten jobber paa serveren"
+                            collaborateMode -> "Gemini og DeepSeek samarbeider"
+                            else -> selectedAI
+                        }
                         Text("$whoTalks skriver...", color = Color.Gray, modifier = Modifier.padding(8.dp))
                     }
                 }
@@ -217,7 +240,7 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                     value = inputText,
                     onValueChange = { inputText = it },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("Spør $selectedAI...") },
+                    placeholder = { Text(if (agentMode) "Beskriv prosjektet agenten skal bygge..." else "Spør $selectedAI...") },
                     colors = TextFieldDefaults.colors(
                         focusedIndicatorColor = Color.Transparent,
                         unfocusedIndicatorColor = Color.Transparent

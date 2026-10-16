@@ -1,19 +1,36 @@
+import ast
 import json
 import os
+import re
 import secrets
+import signal
+import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-import psutil
-import uvicorn
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from loguru import logger
-from pydantic import BaseModel
+try:
+    import psutil
+    import uvicorn
+    from dotenv import load_dotenv
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse
+    from loguru import logger
+    from pydantic import BaseModel
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        f"\nMangler Python-pakken '{exc.name}'.\n"
+        "Du kjorer sannsynligvis system-python (eller sudo) i stedet for prosjektets .venv.\n\n"
+        "  Du skal normalt IKKE kjore main.py selv - systemd gjor det:\n"
+        "      sudo systemctl status servidor-super\n"
+        "      sudo systemctl restart servidor-super\n\n"
+        "  Vil du kjore den manuelt, bruk venv-python (aldri sudo):\n"
+        "      cd backend && ../.venv/bin/python main.py\n"
+    ) from exc
 
 # Nye moduler: agent med verktøy, minne, database og daglig jobb.
 import agent
@@ -24,62 +41,142 @@ import scheduler
 
 # Last inn backend/.env (GEMINI_API_KEY, DEEPSEEK_API_KEY, API_TOKEN m.m.)
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / ".env", override=True)
 
 PROJECTS_DIR = (BASE_DIR / "projects").resolve()
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+TECH_AI_API_KEY = os.environ.get("TECH_AI_API_KEY", "").strip()
+TECH_AI_API_URL = os.environ.get(
+    "TECH_AI_API_URL",
+    "https://tech-ai.tech/api/v1/chat/completions",
+).strip()
+TECH_AI_MODEL = os.environ.get("TECH_AI_MODEL", "tech-ai").strip()
 
-# Prøves i rekkefølge. "-latest"-aliasene blir ofte 503 (overbelastet), så vi faller
-# videre til neste modell i lista. Overstyr med GEMINI_MODELS i .env, f.eks.:
-#   GEMINI_MODELS=gemini-3-flash-preview
-_DEFAULT_MODELS = "gemini-flash-latest,gemini-3-flash-preview,gemini-flash-lite-latest"
+# Prøves i rekkefølge. Vi unngår utgåtte modeller (som gemini-2.5-flash / gemini-2.0-flash)
+# som alltid gir 404.
+_DEFAULT_MODELS = "gemini-3.8-flash,gemini-3-flash-preview,gemini-flash-latest,gemini-flash-lite-latest"
+_DEPRECATED_MODELS = {"gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"}
 GEMINI_MODELS = [
     m.strip()
     for m in (os.environ.get("GEMINI_MODELS") or os.environ.get("GEMINI_MODEL") or _DEFAULT_MODELS).split(",")
-    if m.strip()
+    if m.strip() and m.strip() not in _DEPRECATED_MODELS
 ]
+if not GEMINI_MODELS:
+    GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3-flash-preview", "gemini-flash-latest", "gemini-flash-lite-latest"]
 
-# Modellen som svarte sist - prøves først neste gang, så vi slipper 503-runden.
+# Modellen som svarte sist - prøves først neste gang (men vi låser oss ikke fast til "lite"
+# hvis en sterkere modell er tilgjengelig).
 _gemini_last_good: str | None = None
 
-# HTTP-koder der det er verdt å prøve neste modell i stedet for å gi opp.
-RETRYABLE_STATUS = {404, 408, 429, 500, 502, 503, 504}
+# HTTP-koder der det er verdt å prøve på nytt på samme modell etter en kort pause.
+# 404 betyr at modellen ikke finnes, så da går vi rett videre til neste modell uten å vente.
+TRANSIENT_RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+NEXT_MODEL_STATUS = {400, 404, 408, 429, 500, 502, 503, 504}
 
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
 
-# Personlighetene ligger som konstanter, slik at /chat/gemini, /chat/deepseek og
+# Personlighetene ligger som konstanter, slik at /chat/gemini, /chat/deepseek, /chat/techai og
 # /chat/collaborate oppfører seg likt.
 GEMINI_SYSTEM = (
     "Du er Gemini, en AI-assistent for Ubuntu-serveren til brukeren. "
-    "Svar alltid på Norsk. Vær kort, hyggelig og teknisk presis."
+    "Du har full lese- og skrivetilgang til serveren og prosjektfilene under projects/. "
+    "Du kan kjøre shell-kommandoer, opprette, endre og lagre filer. "
+    "Svar alltid på norsk. Vær kort, hjelpsom og teknisk presis."
 )
 DEEPSEEK_SYSTEM = (
     "Du er DeepSeek, en AI-assistent for Ubuntu-serveren. "
-    "Svar på Norsk. Vær kort og analytisk."
+    "Du har full lese- og skrivetilgang til serveren og prosjektfilene under projects/. "
+    "Du kan kjøre shell-kommandoer, opprette, endre og lagre filer. "
+    "Svar på norsk. Vær kort, analytisk og hjelpsom."
+)
+TECH_AI_SYSTEM = (
+    "Du er Tech-AI (tech-ai.tech), en selvlærende bygge- og kodeagent for Ubuntu-serveren. "
+    "Du hjelper brukeren med å arkitektere, bygge og ferdigstille prosjekter under projects/. "
+    "Du kan kjøre shell-kommandoer, opprette, endre og lagre filer. "
+    "Svar på norsk. Vær løsningsorientert, konkret og teknisk presis."
 )
 
 # Delt hemmelighet. Appen sender den i headeren "X-API-Token".
+# Vi støtter både API_TOKEN og ev. SECONDARY_API_TOKEN fra .env.
 API_TOKEN = os.environ.get("API_TOKEN", "").strip()
+SECONDARY_API_TOKEN = os.environ.get("SECONDARY_API_TOKEN", "").strip()
+VALID_TOKENS = {
+    t.strip()
+    for t in [API_TOKEN, SECONDARY_API_TOKEN, *os.environ.get("API_TOKENS", "").split(",")]
+    if t and t.strip()
+}
 
 # Hvilket grensesnitt og port serveren lytter på.
-# Tips: sett HOST=100.x.y.z (Tailscale-adressen din) for å lytte KUN på Tailscale,
-# da er serveren utilgjengelig fra LAN og internett selv om brannmuren er av.
-HOST = os.environ.get("HOST", "0.0.0.0").strip()
+_raw_host = os.environ.get("HOST", "0.0.0.0").strip()
+if _raw_host.lower().startswith("http://"):
+    _raw_host = _raw_host[7:]
+elif _raw_host.lower().startswith("https://"):
+    _raw_host = _raw_host[8:]
+if ":" in _raw_host:
+    _raw_host = _raw_host.split(":")[0]
+HOST = _raw_host.strip() or "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8000"))
 
 # Disse kan nås uten token: helsesjekk + innlogging/registrering.
 OPEN_PATHS = {"/", "/health", "/auth/login", "/auth/register"}
 
-app = FastAPI(title="Super-Server API", version="1.0.0")
+# Tailscale auto-connect konfigurasjon (leses fra backend/.env)
+TAILSCALE_AUTH_KEY = os.environ.get("TAILSCALE_AUTH_KEY", "").strip()
+AUTO_CONNECT_TAILSCALE = os.environ.get("AUTO_CONNECT_TAILSCALE", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _connect_tailscale() -> None:
+    """Kobler maskinen automatisk til Tailscale i bakgrunnen ved oppstart."""
+    if not TAILSCALE_AUTH_KEY:
+        logger.warning("Tailscale auto-connect: Ingen TAILSCALE_AUTH_KEY funnet.")
+        return
+
+    logger.info("Forsøker å koble til Tailscale...")
+    cmd = ["tailscale", "up", f"--auth-key={TAILSCALE_AUTH_KEY}"]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+        logger.info("Tailscale tilkoblet! Output: {}", res.stdout.strip() or "OK")
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or e.stdout or "").strip()
+        logger.error("Tailscale up feilet (kode {}): {}", e.returncode, err)
+        if "access denied" in err.lower() or "permission denied" in err.lower() or "operator" in err.lower():
+            logger.warning(
+                "Tips: Hvis tilgang ble nektet, gi brukeren operatørtilgang med: sudo tailscale set --operator={}",
+                os.environ.get("USER", "bruker"),
+            )
+    except FileNotFoundError:
+        logger.error("Kommandoen 'tailscale' ble ikke funnet i PATH på systemet.")
+    except Exception as e:
+        logger.error("Uventet feil under tilkobling til Tailscale: {}", e)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Kjører Tailscale-tilkoblingen asynkront i bakgrunnen ved oppstart for ikke å blokkere serveren."""
+    if AUTO_CONNECT_TAILSCALE:
+        threading.Thread(target=_connect_tailscale, daemon=True, name="tailscale-connect").start()
+    yield
+
+
+app = FastAPI(title="Super-Server API", version="1.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _is_valid_token(supplied: str) -> bool:
+    if not supplied:
+        return False
+    for valid in VALID_TOKENS:
+        if secrets.compare_digest(supplied.encode("utf-8"), valid.encode("utf-8")):
+            return True
+    return False
 
 
 @app.middleware("http")
@@ -122,16 +219,134 @@ if not API_TOKEN:
         HOST, PORT,
     )
 else:
-    logger.info("Token-beskyttelse aktiv ({} tegn).", len(API_TOKEN))
+    logger.info("Token-beskyttelse aktiv ({} gyldige tokens konfigurert).", len(VALID_TOKENS))
 
 
 def safe_path(relative: str) -> Path:
     """Løser opp en klient-oppgitt sti og nekter alt som ligger utenfor PROJECTS_DIR."""
-    candidate = (PROJECTS_DIR / (relative or "")).resolve()
+    cleaned = (relative or "").strip()
+    candidate = (PROJECTS_DIR / cleaned).resolve()
     if candidate != PROJECTS_DIR and PROJECTS_DIR not in candidate.parents:
         logger.warning("Blokkert sti utenfor projects/: {!r}", relative)
         raise HTTPException(status_code=403, detail="Acceso denegado")
     return candidate
+
+
+def _resolve_agent_workdir(project_str: str, fallback_project: str = "") -> tuple[Path, str, str | None]:
+    """Sikrer at agenten aldri krasjer hele oppgaven med HTTP 403 dersom modellen
+    foreslår '..' eller en sti utenfor projects/. Returnerer (workdir, rel_project, warning)."""
+    raw = (project_str or "").strip().strip("/")
+    # Fjern eventuelle innledende "projects/" eller "backend/projects/" hvis modellen inkluderer det
+    for prefix in ("backend/projects/", "projects/", "./"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):].strip("/")
+
+    if not raw or raw in {".", ".."} or raw.startswith("../") or "/.." in raw:
+        warn = None
+        if raw in {".."} or raw.startswith("../") or "/.." in raw:
+            warn = (
+                f"Merk: Stien '{project_str}' peker utenfor projects/ og ble automatisk "
+                f"korrigert til '{fallback_project or '.'}' inne i backend/projects/."
+            )
+            logger.warning("Agent foreslo ugyldig project={!r}, korrigerer til {!r}", project_str, fallback_project)
+        raw = fallback_project
+
+    try:
+        workdir = safe_path(raw)
+        rel = workdir.relative_to(PROJECTS_DIR).as_posix() if workdir != PROJECTS_DIR else ""
+        return workdir, rel, warn
+    except HTTPException:
+        warn = (
+            f"Merk: Stien '{project_str}' er utenfor backend/projects/ og er ikke tillatt. "
+            f"Bruker '{fallback_project or '.'}' i stedet."
+        )
+        try:
+            workdir = safe_path(fallback_project)
+            rel = workdir.relative_to(PROJECTS_DIR).as_posix() if workdir != PROJECTS_DIR else ""
+        except HTTPException:
+            workdir = PROJECTS_DIR
+            rel = ""
+        return workdir, rel, warn
+
+
+def _sanitize_agent_command(command: str) -> tuple[str, str | None]:
+    """Forhindrer at kommandoer henger på interaktiv sudo eller passord-prompt."""
+    cmd = command.strip()
+    note = None
+    # Hvis agenten prøver å bruke sudo, legg til -n så den aldri henger, eller fjern sudo
+    # på vanlige filkommandoer inne i projects/.
+    if re.search(r"(^|[;&|]\s*)sudo\s+(?!-n\b)", cmd):
+        cmd = re.sub(r"(^|[;&|]\s*)sudo\s+", r"\1sudo -n ", cmd)
+        note = (
+            "Merk: 'sudo' uten passord er ikke tilgjengelig for agenten. "
+            "Bruk lokale verktøy/pakker uten sudo (f.eks. python3 -m venv, pip, npm lokalt)."
+        )
+    return cmd, note
+
+
+def _run_command(command: str, workdir: Path, timeout: int) -> dict:
+    """Kjører en shell-kommando ikke-interaktivt med cwd inne i projects/.
+    Dreper hele prosessgruppen ved timeout, og kapper output."""
+    timeout = max(5, min(int(timeout), AGENT_SHELL_TIMEOUT))
+    started = time.monotonic()
+
+    cmd, sudo_note = _sanitize_agent_command(command)
+
+    env = os.environ.copy()
+    env.update({
+        "DEBIAN_FRONTEND": "noninteractive",
+        "CI": "true",
+        "GIT_TERMINAL_PROMPT": "0",
+        "npm_config_yes": "true",
+        "PIP_NO_INPUT": "1",
+        "PYTHONUNBUFFERED": "1",
+        "PAGER": "cat",
+    })
+
+    proc = subprocess.Popen(
+        cmd,
+        shell=True,
+        cwd=str(workdir),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        out, err = proc.communicate()
+        code = 124
+
+    if sudo_note and code != 0:
+        err = f"{(err or '').rstrip()}\n{sudo_note}".strip()
+
+    rel = workdir.relative_to(PROJECTS_DIR).as_posix() if workdir != PROJECTS_DIR else ""
+    return {
+        "exit_code": code,
+        "stdout": (out or "")[:MAX_OUTPUT_CHARS],
+        "stderr": (err or "")[:MAX_OUTPUT_CHARS],
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "timed_out": timed_out,
+        "cwd": rel,
+    }
+
+
+def _require_agent_shell() -> None:
+    if not AGENT_SHELL_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail="Shell-tilgang er av. Sett ENABLE_AGENT_SHELL=1 i backend/.env og restart tjenesten.",
+        )
 
 
 @app.get("/")
@@ -152,14 +367,17 @@ def health():
         "gemini_model_last_ok": _gemini_last_good,
         "gemini_key_configured": bool(GEMINI_API_KEY),
         "deepseek_key_configured": bool(DEEPSEEK_API_KEY),
+        "agent_shell_enabled": AGENT_SHELL_ENABLED,
+        "tailscale_configured": bool(TAILSCALE_AUTH_KEY),
+        "agent_running": _agent_state.get("running", False),
     }
 
 
 @app.get("/stats")
 def get_system_stats():
     memory_info = psutil.virtual_memory()
-    disk_info = psutil.disk_usage('/')
-    
+    disk_info = psutil.disk_usage("/")
+
     temp_c = 0.0
     if hasattr(psutil, "sensors_temperatures"):
         temps = psutil.sensors_temperatures()
@@ -179,7 +397,7 @@ def get_system_stats():
         "disk_used_gb": disk_info.used // (1024**3),
         "disk_total_gb": disk_info.total // (1024**3),
         "disk_percent": disk_info.percent,
-        "temp_c": temp_c
+        "temp_c": temp_c,
     }
 
 
@@ -193,6 +411,8 @@ def list_projects(path: str = ""):
 
     items = []
     for item in sorted(target_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        if item.name.startswith(".agent_"):
+            continue
         rel_path = item.name if not path else f"{path.rstrip('/')}/{item.name}"
         items.append({
             "name": item.name,
@@ -208,6 +428,8 @@ def recent_changes():
     files_with_times = []
     for root, _dirs, files in os.walk(PROJECTS_DIR):
         for file in files:
+            if file.startswith(".agent_"):
+                continue
             file_path = Path(root) / file
             try:
                 mtime = file_path.stat().st_mtime
@@ -218,7 +440,6 @@ def recent_changes():
                 "mtime": mtime,
             })
 
-    # Sorter med nyeste først, ta topp 5
     files_with_times.sort(key=lambda f: f["mtime"], reverse=True)
     return {"recent": files_with_times[:5]}
 
@@ -248,11 +469,72 @@ def save_file(path: str, data: SaveFileRequest):
     return {"message": "Guardado"}
 
 
+# ---------------------------------------------------------------------------
+# Prosjekter og shell
+# ---------------------------------------------------------------------------
+
+
+class ShellRequest(BaseModel):
+    command: str = ""
+    cwd: str = ""
+    timeout: int = 120
+
+
+@app.post("/shell")
+def run_shell(body: ShellRequest):
+    """Kjører en shell-kommando inne i backend/projects/."""
+    _require_agent_shell()
+    command = body.command.strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="Tom kommando")
+
+    workdir = safe_path(body.cwd)
+    workdir.mkdir(parents=True, exist_ok=True)
+    if not workdir.is_dir():
+        raise HTTPException(status_code=400, detail="cwd er ikke en mappe")
+
+    where = workdir.relative_to(PROJECTS_DIR).as_posix() or "."
+    logger.info("Shell i projects/{}: {}", where, command[:200])
+    return {"command": command, **_run_command(command, workdir, body.timeout)}
+
+
+class CreateProjectRequest(BaseModel):
+    name: str = ""
+    git: bool = True
+    readme: bool = True
+
+
+@app.post("/projects/create")
+def create_project(body: CreateProjectRequest):
+    """Lager en ny prosjektmappe under backend/projects/."""
+    name = body.name.strip().strip("/")
+    if not name:
+        raise HTTPException(status_code=400, detail="Prosjektnavn mangler")
+
+    target = safe_path(name)
+    if target == PROJECTS_DIR:
+        raise HTTPException(status_code=400, detail="Ugyldig prosjektnavn")
+    if target.exists():
+        raise HTTPException(status_code=409, detail="Prosjektet finnes allerede")
+
+    target.mkdir(parents=True)
+    files = []
+    if body.readme:
+        (target / "README.md").write_text(f"# {name}\n", encoding="utf-8")
+        files.append("README.md")
+    if body.git:
+        _run_command("git init -q && git add -A && git commit -qm init || true", target, 60)
+
+    rel = target.relative_to(PROJECTS_DIR).as_posix()
+    logger.info("Opprettet prosjekt {}", rel)
+    return {"name": name, "path": rel, "files": files}
+
+
 class ChatRequest(BaseModel):
     message: str = ""
 
 
-def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 60) -> dict:
+def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 40) -> dict:
     """Sender JSON med POST og returnerer svaret som dict."""
     request_obj = urllib.request.Request(
         url,
@@ -276,35 +558,71 @@ def _error_detail(exc: Exception) -> str:
 
 
 def _gemini_model_order() -> list[str]:
-    """Den modellen som virket sist prøves først, så resten i konfigurert rekkefølge."""
-    if _gemini_last_good:
+    """Foretrekker den modellen som virket sist, men unngår å låse seg fast til 'lite'
+    slik at de sterkere modellene alltid prøves først."""
+    if _gemini_last_good and "lite" not in _gemini_last_good:
         return [_gemini_last_good] + [m for m in GEMINI_MODELS if m != _gemini_last_good]
     return list(GEMINI_MODELS)
 
 
-def _ask_gemini(prompt: str) -> tuple[str, str]:
+def _ask_gemini(prompt: str, json_mode: bool = False) -> tuple[str, str]:
     """Sender prompt til Gemini med modell-fallback. Returnerer (svar, modell)."""
     global _gemini_last_good
 
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY mangler i backend/.env")
+
+    gen_config: dict = {
+        "temperature": 0.2 if json_mode else 0.5,
+        "maxOutputTokens": 8192,
+    }
+    if json_mode:
+        gen_config["responseMimeType"] = "application/json"
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": gen_config,
+    }
     problems: list[str] = []
+
     for model in _gemini_model_order():
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
             f":generateContent?key={GEMINI_API_KEY}"
         )
-        try:
-            result = _post_json(url, payload)
-        except urllib.error.HTTPError as e:
-            problems.append(f"{model}: {_error_detail(e)}")
-            if e.code in RETRYABLE_STATUS:
-                # F.eks. 503 "high demand" - prøv neste modell i stedet for å gi opp
-                logger.warning("Gemini-modellen {} svarte {} - prøver neste", model, e.code)
-                continue
-            break
-        except Exception as e:
-            problems.append(f"{model}: {_error_detail(e)}")
-            logger.warning("Gemini-kall mot {} feilet: {}", model, e)
+        result = None
+        for attempt in range(2):
+            try:
+                result = _post_json(url, payload, timeout=35)
+                break
+            except urllib.error.HTTPError as e:
+                detail = _error_detail(e)
+                problems.append(f"{model} (forsøk {attempt + 1}): {detail}")
+                # Hvis en modell ikke støtter responseMimeType, prøv uten
+                if e.code == 400 and json_mode and "responseMimeType" in payload.get("generationConfig", {}):
+                    fallback_payload = {
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192},
+                    }
+                    try:
+                        result = _post_json(url, fallback_payload, timeout=35)
+                        break
+                    except Exception as inner_e:
+                        problems.append(f"{model} (uten mime): {_error_detail(inner_e)}")
+                        break
+                if e.code in TRANSIENT_RETRY_STATUS and attempt == 0:
+                    logger.warning("Gemini-modellen {} svarte {} - venter 1.2s og prøver igjen", model, e.code)
+                    time.sleep(1.2)
+                    continue
+                if e.code in NEXT_MODEL_STATUS:
+                    logger.warning("Gemini-modellen {} svarte {} - prøver neste modell", model, e.code)
+                break
+            except Exception as e:
+                problems.append(f"{model}: {_error_detail(e)}")
+                logger.warning("Gemini-kall mot {} feilet: {}", model, e)
+                break
+
+        if not result:
             continue
 
         candidates = result.get("candidates") or []
@@ -312,7 +630,11 @@ def _ask_gemini(prompt: str) -> tuple[str, str]:
             problems.append(f"{model}: tomt svar (blokkert av sikkerhetsfilter?)")
             continue
         try:
-            text = candidates[0]["content"]["parts"][0]["text"]
+            parts = candidates[0]["content"]["parts"]
+            text_chunks = [p["text"] for p in parts if isinstance(p, dict) and "text" in p]
+            text = "\n".join(text_chunks).strip()
+            if not text:
+                raise KeyError("Ingen tekst i parts")
         except (KeyError, IndexError, TypeError):
             problems.append(f"{model}: uventet svarstruktur")
             continue
@@ -322,25 +644,90 @@ def _ask_gemini(prompt: str) -> tuple[str, str]:
         _gemini_last_good = model
         return text, model
 
-    raise RuntimeError("Ingen Gemini-modell svarte. " + " | ".join(problems[:3]))
+    raise RuntimeError("Ingen Gemini-modell svarte. " + " | ".join(problems[:4]))
 
 
-def _ask_deepseek(prompt: str) -> tuple[str, str]:
+def _ask_deepseek(prompt: str, json_mode: bool = False) -> tuple[str, str]:
     """Sender prompt til DeepSeek. Returnerer (svar, modell)."""
+    if not DEEPSEEK_API_KEY:
+        raise RuntimeError("DEEPSEEK_API_KEY mangler i backend/.env")
+
     url = "https://api.deepseek.com/chat/completions"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
     }
-    payload = {
+    sys_msg = (
+        "Du er en autonom kodeagent på en Ubuntu-server. Svar kun med gyldig JSON."
+        if json_mode
+        else DEEPSEEK_SYSTEM
+    )
+    payload: dict = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": DEEPSEEK_SYSTEM},
+            {"role": "system", "content": sys_msg},
             {"role": "user", "content": prompt},
         ],
+        "max_tokens": 4096,
+        "temperature": 0.2 if json_mode else 0.5,
     }
-    result = _post_json(url, payload, headers)
-    return result["choices"][0]["message"]["content"], DEEPSEEK_MODEL
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    last_err: Exception | None = None
+    for attempt in range(2):
+        try:
+            result = _post_json(url, payload, headers, timeout=45)
+            return result["choices"][0]["message"]["content"], DEEPSEEK_MODEL
+        except Exception as e:
+            last_err = e
+            if json_mode and "response_format" in payload:
+                payload.pop("response_format", None)
+            if attempt == 0:
+                logger.warning("DeepSeek feilet på forsøk 1 ({}), prøver igjen...", _error_detail(e))
+                time.sleep(1.0)
+    raise RuntimeError(f"DeepSeek feilet: {_error_detail(last_err) if last_err else 'ukjent feil'}")
+
+
+def _ask_techai(prompt: str, json_mode: bool = False) -> tuple[str, str]:
+    """Sender prompt til Tech-AI (tech-ai.tech). Støtter både OpenAI-kompatibelt
+    endepunkt og enkelt JSON-format ({message/prompt} -> {reply/response})."""
+    if not TECH_AI_API_KEY and not os.environ.get("TECH_AI_API_URL"):
+        raise RuntimeError("TECH_AI_API_KEY / TECH_AI_API_URL mangler i backend/.env")
+
+    headers = {"Content-Type": "application/json"}
+    if TECH_AI_API_KEY:
+        headers["Authorization"] = f"Bearer {TECH_AI_API_KEY}"
+        headers["X-API-Key"] = TECH_AI_API_KEY
+
+    sys_msg = (
+        "Du er Tech-AI kodeagent på en Ubuntu-server. Svar kun med gyldig JSON."
+        if json_mode
+        else TECH_AI_SYSTEM
+    )
+    payload: dict = {
+        "model": TECH_AI_MODEL,
+        "messages": [
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": prompt},
+        ],
+        "message": prompt,
+        "prompt": prompt,
+        "max_tokens": 4096,
+        "temperature": 0.2 if json_mode else 0.5,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    result = _post_json(TECH_AI_API_URL, payload, headers, timeout=45)
+    if "choices" in result and result["choices"]:
+        msg = result["choices"][0].get("message") or {}
+        text = msg.get("content") or result["choices"][0].get("text") or ""
+        return str(text), TECH_AI_MODEL
+    for key in ("reply", "response", "text", "answer", "content"):
+        if key in result and isinstance(result[key], str):
+            return result[key], TECH_AI_MODEL
+    raise RuntimeError(f"Uventet svar fra Tech-AI: {str(result)[:200]}")
 
 
 @app.post("/chat/gemini")
@@ -348,6 +735,10 @@ def chat_gemini(body: ChatRequest):
     user_message = body.message.strip()
     if not user_message:
         return {"reply": "Hei! Jeg er Gemini. Hva kan jeg hjelpe deg med?"}
+    # Hvis serveren er satt opp med Tech-AI i stedet for Gemini (f.eks. hos en venn),
+    # rutes /chat/gemini sømløst til Tech-AI!
+    if not GEMINI_API_KEY and TECH_AI_API_KEY:
+        return chat_techai(body)
     if not GEMINI_API_KEY:
         return {"reply": "Gemini Feil: GEMINI_API_KEY mangler i backend/.env"}
 
@@ -356,7 +747,35 @@ def chat_gemini(body: ChatRequest):
         return {"reply": text}
     except Exception as e:
         logger.error("Gemini feilet: {}", e)
+        if DEEPSEEK_API_KEY:
+            try:
+                text, _model = _ask_deepseek(user_message)
+                return {"reply": f"(Svar via DeepSeek-fallback fordi Gemini var opptatt)\n\n{text}"}
+            except Exception:
+                pass
         return {"reply": f"Gemini Feil: {e}"}
+
+
+@app.post("/chat/techai")
+def chat_techai(body: ChatRequest):
+    user_message = body.message.strip()
+    if not user_message:
+        return {"reply": "Hei! Jeg er Tech-AI. Hva skal vi bygge i dag?"}
+
+    try:
+        if TECH_AI_API_KEY or os.environ.get("TECH_AI_API_URL"):
+            text, _model = _ask_techai(user_message)
+            return {"reply": text}
+        if GEMINI_API_KEY:
+            text, _model = _ask_gemini(f"{TECH_AI_SYSTEM}\n\nBruker: {user_message}\nTech-AI:")
+            return {"reply": text}
+        if DEEPSEEK_API_KEY:
+            text, _model = _ask_deepseek(f"{TECH_AI_SYSTEM}\n\nBruker: {user_message}")
+            return {"reply": text}
+        return {"reply": "Tech-AI Feil: Legg inn TECH_AI_API_KEY i backend/.env"}
+    except Exception as e:
+        logger.error("Tech-AI feilet: {}", e)
+        return {"reply": f"Tech-AI Feil: {_error_detail(e)}"}
 
 
 @app.post("/chat/deepseek")
@@ -372,40 +791,89 @@ def chat_deepseek(body: ChatRequest):
         return {"reply": text}
     except Exception as e:
         logger.error("DeepSeek feilet: {}", e)
+        if GEMINI_API_KEY:
+            try:
+                text, _model = _ask_gemini(f"{GEMINI_SYSTEM}\n\nBruker: {user_message}\nGemini:")
+                return {"reply": f"(Svar via Gemini-fallback fordi DeepSeek var opptatt)\n\n{text}"}
+            except Exception:
+                pass
         return {"reply": f"DeepSeek Feil: {_error_detail(e)}"}
 
 
 # ---------------------------------------------------------------------------
 # Samarbeid mellom de to agentene
-#
-# Dette er et EGET lag ved siden av /chat/gemini og /chat/deepseek, som begge
-# er uendret. Flyten er: den valgte agenten svarer brukeren, den andre
-# kontrollerer svaret, og finner den en feil får den første rette opp.
 # ---------------------------------------------------------------------------
 
 
 class CollaborateRequest(BaseModel):
     message: str = ""
-    primary: str = "gemini"  # "gemini" eller "deepseek" - hvem som svarer brukeren
+    primary: str = "gemini"  # "gemini", "deepseek" eller "techai"
 
 
 def _normalize_agent(name: str) -> str:
-    return "deepseek" if (name or "").strip().lower().startswith("deep") else "gemini"
+    low = (name or "").strip().lower()
+    if low.startswith("deep"):
+        return "deepseek"
+    if low.startswith("tech"):
+        return "techai"
+    if not GEMINI_API_KEY and TECH_AI_API_KEY:
+        return "techai"
+    return "gemini"
 
 
 def _agent_label(key: str) -> str:
-    return "DeepSeek" if key == "deepseek" else "Gemini"
+    if key == "deepseek":
+        return "DeepSeek"
+    if key == "techai":
+        return "Tech-AI"
+    return "Gemini"
 
 
 def _system_prompt(key: str) -> str:
-    return DEEPSEEK_SYSTEM if key == "deepseek" else GEMINI_SYSTEM
-
-
-def _ask_agent(key: str, prompt: str) -> tuple[str, str]:
-    """Sender prompt til valgt agent. Returnerer (svar, modell)."""
     if key == "deepseek":
-        return _ask_deepseek(prompt)
-    return _ask_gemini(prompt)
+        return DEEPSEEK_SYSTEM
+    if key == "techai":
+        return TECH_AI_SYSTEM
+    return GEMINI_SYSTEM
+
+
+def _ask_agent(key: str, prompt: str, json_mode: bool = False) -> tuple[str, str]:
+    """Sender prompt til valgt agent. Hvis hovedagenten er utilgjengelig/overbelastet,
+    faller den automatisk tilbake til en av de andre konfigurerte AI-agentene slik at
+    oppgaver aldri stopper!"""
+    if key == "deepseek":
+        try:
+            return _ask_deepseek(prompt, json_mode=json_mode)
+        except Exception as primary_err:
+            if TECH_AI_API_KEY:
+                logger.warning("DeepSeek feilet ({}), faller tilbake til Tech-AI...", primary_err)
+                return _ask_techai(prompt, json_mode=json_mode)
+            if GEMINI_API_KEY:
+                logger.warning("DeepSeek feilet ({}), faller tilbake til Gemini...", primary_err)
+                return _ask_gemini(prompt, json_mode=json_mode)
+            raise
+    elif key == "techai":
+        try:
+            return _ask_techai(prompt, json_mode=json_mode)
+        except Exception as primary_err:
+            if DEEPSEEK_API_KEY:
+                logger.warning("Tech-AI feilet ({}), faller tilbake til DeepSeek...", primary_err)
+                return _ask_deepseek(prompt, json_mode=json_mode)
+            if GEMINI_API_KEY:
+                logger.warning("Tech-AI feilet ({}), faller tilbake til Gemini...", primary_err)
+                return _ask_gemini(prompt, json_mode=json_mode)
+            raise
+    else:
+        try:
+            return _ask_gemini(prompt, json_mode=json_mode)
+        except Exception as primary_err:
+            if TECH_AI_API_KEY:
+                logger.warning("Gemini feilet ({}), faller tilbake til Tech-AI...", primary_err)
+                return _ask_techai(prompt, json_mode=json_mode)
+            if DEEPSEEK_API_KEY:
+                logger.warning("Gemini feilet ({}), faller tilbake til DeepSeek...", primary_err)
+                return _ask_deepseek(prompt, json_mode=json_mode)
+            raise
 
 
 def _server_context() -> str:
@@ -413,6 +881,8 @@ def _server_context() -> str:
     recent: list[tuple[float, str]] = []
     for root, _dirs, files in os.walk(PROJECTS_DIR):
         for name in files:
+            if name.startswith(".agent_"):
+                continue
             file_path = Path(root) / name
             try:
                 recent.append((file_path.stat().st_mtime, file_path.relative_to(PROJECTS_DIR).as_posix()))
@@ -677,7 +1147,5 @@ def _on_startup():
 
 
 if __name__ == "__main__":
-    # Kan overstyres med HOST/PORT i .env eller som miljøvariabler.
-    # F.eks. HOST=100.x.y.z for å lytte kun på Tailscale-adressen.
     logger.info("Super-Server lytter på http://{}:{}", HOST, PORT)
     uvicorn.run(app, host=HOST, port=PORT)

@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Super-Server Mobile</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card: #151d30;
+      --card-border: #233152;
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --accent: #10b981;
+      --accent-warn: #f59e0b;
+      --accent-danger: #ef4444;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --nav-height: 65px;
+      --header-height: 55px;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+      user-select: none;
+    }
+    /* Header */
+    header {
+      height: var(--header-height);
+      background: rgba(21, 29, 48, 0.95);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      z-index: 100;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 1.1rem;
+    }
+    .brand-icon {
+      width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, #6366f1, #a855f7);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+    }
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: #1e293b;
+      border: 1px solid var(--card-border);
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-danger);
+    }
+    .status-dot.online {
+      background: var(--accent);
+      box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+    }
+
+    /* Main Viewport */
+    main {
+      flex: 1;
+      overflow-y: auto;
+      padding-bottom: calc(var(--nav-height) + 16px);
+      -webkit-overflow-scrolling: touch;
+    }
+    .tab-content {
+      display: none;
+      padding: 16px;
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    .tab-content.active {
+      display: block;
+      animation: fadeIn 0.2s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Cards */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+    .card-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* Gauges Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .stat-box {
+      background: #0f172a;
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 12px;
+      text-align: center;
+    }
+    .stat-val {
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin: 4px 0;
+    }
+    .stat-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    .progress-bar {
+      height: 6px;
+      background: #1e293b;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--primary);
+      width: 0%;
+      transition: width 0.4s ease;
+    }
+
+    /* Chat Section */
+    .chat-container {
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - var(--header-height) - var(--nav-height) - 32px);
+    }
+    .chat-selector {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .agent-chip {
+      flex: 1;
+      padding: 8px;
+      background: #1e293b;
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-align: center;
+      cursor: pointer;
+    }
+    .agent-chip.active {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding-right: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .message {
+      max-width: 85%;
+      padding: 10px 14px;
+      border-radius: 16px;
+      font-size: 0.9rem;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+    .message.user {
+      align-self: flex-end;
+      background: var(--primary);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .message.bot {
+      align-self: flex-start;
+      background: #1e293b;
+      border: 1px solid var(--card-border);
+      color: var(--text);
+      border-bottom-left-radius: 4px;
+    }
+    .chat-input-bar {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    input[type="text"], input[type="password"] {
+      flex: 1;
+      background: #0f172a;
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      color: var(--text);
+      font-size: 0.95rem;
+      outline: none;
+    }
+    input:focus {
+      border-color: var(--primary);
+    }
+    button {
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      padding: 12px 18px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    button:active {
+      opacity: 0.8;
+    }
+
+    /* Terminal Console */
+    .terminal-box {
+      background: #000;
+      color: #10b981;
+      font-family: monospace;
+      font-size: 0.8rem;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid var(--card-border);
+      height: 250px;
+      overflow-y: auto;
+      margin-top: 12px;
+      white-space: pre-wrap;
+    }
+
+    /* Bottom Navigation */
+    nav {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: var(--nav-height);
+      background: rgba(21, 29, 48, 0.95);
+      backdrop-filter: blur(10px);
+      border-top: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      z-index: 100;
+    }
+    .nav-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: color 0.2s;
+    }
+    .nav-item.active {
+      color: var(--primary);
+    }
+    .nav-icon {
+      font-size: 1.3rem;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      <span>Super-Server</span>
+    </div>
+    <div class="status-badge" id="statusBadge" onclick="checkStatus()">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">Kobler til...</span>
+    </div>
+  </header>
+
+  <!-- Main Viewports -->
+  <main>
+    <!-- TAB 1: DASHBOARD -->
+    <section id="tab-dashboard" class="tab-content active">
+      <div class="card">
+        <div class="card-title">
+          <span>Sanntidsressurser</span>
+          <span style="font-size:0.75rem; color:var(--accent);" id="refreshTimer">Auto 3s</span>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-box">
+            <div class="stat-label">CPU BRUK</div>
+            <div class="stat-val" id="cpuVal">--%</div>
+            <div class="progress-bar"><div class="progress-fill" id="cpuBar"></div></div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">RAM BRUK</div>
+            <div class="stat-val" id="ramVal">--%</div>
+            <div class="progress-bar"><div class="progress-fill" id="ramBar"></div></div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">DISKPLASS</div>
+            <div class="stat-val" id="diskVal">--%</div>
+            <div class="progress-bar"><div class="progress-fill" id="diskBar"></div></div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">TEMPERATUR</div>
+            <div class="stat-val" id="tempVal">--°C</div>
+            <div class="progress-bar"><div class="progress-fill" id="tempBar"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Tjenester & Agenter</div>
+        <div style="font-size:0.85rem; line-height:1.8;">
+          <div>📡 Tailscale: <b id="tailscaleStatus" style="color:var(--accent);">Aktiv</b></div>
+          <div>✨ Gemini API: <b id="geminiStatus">--</b></div>
+          <div>🧠 DeepSeek API: <b id="deepseekStatus">--</b></div>
+          <div>💻 Shell-tilgang: <b id="shellStatus">--</b></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: AI CHAT -->
+    <section id="tab-chat" class="tab-content">
+      <div class="chat-container">
+        <div class="chat-selector">
+          <div class="agent-chip active" onclick="setAgent('gemini', this)">Gemini</div>
+          <div class="agent-chip" onclick="setAgent('deepseek', this)">DeepSeek</div>
+          <div class="agent-chip" onclick="setAgent('collaborate', this)">Samarbeid</div>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+          <div class="message bot">Hei! Spør meg om hva som helst på serveren din.</div>
+        </div>
+        <div class="chat-input-bar">
+          <input type="text" id="chatInput" placeholder="Skriv melding..." onkeydown="if(event.key==='Enter') sendMessage()">
+          <button onclick="sendMessage()">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: AGENT & SHELL -->
+    <section id="tab-agent" class="tab-content">
+      <div class="card">
+        <div class="card-title">Autonom Kodeagent</div>
+        <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:12px;">
+          Gi et mål til agenten, så planlegger og koder den direkte på serveren.
+        </p>
+        <input type="text" id="agentGoal" placeholder="F.eks: Lag en enkel html-side i prosjektet 'demo'" style="width:100%; margin-bottom:8px;">
+        <button onclick="runAgent()" style="width:100%;">Kjør Agent</button>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Terminal Output</div>
+        <div class="terminal-box" id="terminalOutput">Klar for kjøring...</div>
+      </div>
+    </section>
+
+    <!-- TAB 4: SETTINGS -->
+    <section id="tab-settings" class="tab-content">
+      <div class="card">
+        <div class="card-title">Tilkoblingsinnstillinger</div>
+        <div style="margin-bottom:12px;">
+          <label style="font-size:0.8rem; color:var(--text-muted);">Server URL (Tailscale):</label>
+          <input type="text" id="serverUrlInput" value="http://100.115.248.101:8000" style="width:100%; margin-top:4px;">
+        </div>
+        <div style="margin-bottom:16px;">
+          <label style="font-size:0.8rem; color:var(--text-muted);">API Token (X-API-Token):</label>
+          <input type="password" id="apiTokenInput" placeholder="Lim inn API_TOKEN..." style="width:100%; margin-top:4px;">
+        </div>
+        <button onclick="saveSettings()" style="width:100%;">Lagre & Koble til på nytt</button>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Om Appen</div>
+        <div style="font-size:0.85rem; color:var(--text-muted); line-height:1.6;">
+          Super-Server Mobile Controller v1.0.0<br>
+          Tailscale-profil: <b>hesriverp7-server</b><br>
+          Tilkoblet vert: <code>100.115.248.101:8000</code> / <code>http://hesriverp7-server:8000</code>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Bottom Navigation -->
+  <nav>
+    <div class="nav-item active" onclick="switchTab('dashboard', this)">
+      <div class="nav-icon">📊</div>
+      <span>Status</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('chat', this)">
+      <div class="nav-icon">💬</div>
+      <span>AI Chat</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('agent', this)">
+      <div class="nav-icon">🤖</div>
+      <span>Agent</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('settings', this)">
+      <div class="nav-icon">⚙️</div>
+      <span>Oppsett</span>
+    </div>
+  </nav>
+
+  <script>
+    let serverUrl = localStorage.getItem("serverUrl") || "http://100.115.248.101:8000";
+    let apiToken = localStorage.getItem("apiToken") || "";
+    let currentAgent = "gemini";
+    let statsInterval = null;
+
+    document.getElementById("serverUrlInput").value = serverUrl;
+    document.getElementById("apiTokenInput").value = apiToken;
+
+    function saveSettings() {
+      serverUrl = document.getElementById("serverUrlInput").value.trim().replace(/\/+$/, "");
+      apiToken = document.getElementById("apiTokenInput").value.trim();
+      localStorage.setItem("serverUrl", serverUrl);
+      localStorage.setItem("apiToken", apiToken);
+      checkStatus();
+      alert("Innstillinger lagret!");
+    }
+
+    function switchTab(tabId, el) {
+      document.querySelectorAll(".tab-content").forEach(t => t.classList.remove("active"));
+      document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
+      document.getElementById("tab-" + tabId).classList.add("active");
+      el.classList.add("active");
+    }
+
+    function setAgent(agent, el) {
+      currentAgent = agent;
+      document.querySelectorAll(".agent-chip").forEach(c => c.classList.remove("active"));
+      el.classList.add("active");
+    }
+
+    async function apiFetch(endpoint, options = {}) {
+      const url = `${serverUrl}${endpoint}`;
+      const headers = {
+        "Content-Type": "application/json",
+        ...(apiToken ? { "X-API-Token": apiToken } : {}),
+        ...(options.headers || {})
+      };
+      return fetch(url, { ...options, headers });
+    }
+
+    async function checkStatus() {
+      const dot = document.getElementById("statusDot");
+      const text = document.getElementById("statusText");
+      try {
+        const res = await apiFetch("/health");
+        if (res.ok) {
+          const data = await res.json();
+          dot.classList.add("online");
+          text.textContent = "Online (Tailscale)";
+          document.getElementById("geminiStatus").textContent = data.gemini_key_configured ? "Aktiv" : "Mangler nøkkel";
+          document.getElementById("geminiStatus").style.color = data.gemini_key_configured ? "var(--accent)" : "var(--accent-warn)";
+          document.getElementById("deepseekStatus").textContent = data.deepseek_key_configured ? "Aktiv" : "Mangler nøkkel";
+          document.getElementById("deepseekStatus").style.color = data.deepseek_key_configured ? "var(--accent)" : "var(--accent-warn)";
+          document.getElementById("shellStatus").textContent = data.agent_shell_enabled ? "Aktiv" : "Avslått";
+          return true;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      dot.classList.remove("online");
+      text.textContent = "Frakoblet";
+      return false;
+    }
+
+    async function fetchStats() {
+      try {
+        const res = await apiFetch("/stats");
+        if (res.ok) {
+          const stats = await res.json();
+          const cpu = Math.round(stats.cpu_percent || 0);
+          const ram = Math.round(stats.ram_percent || 0);
+          const disk = Math.round(stats.disk_percent || 0);
+          const temp = Math.round(stats.temp_c || 0);
+
+          document.getElementById("cpuVal").textContent = cpu + "%";
+          document.getElementById("cpuBar").style.width = cpu + "%";
+          document.getElementById("ramVal").textContent = ram + "%";
+          document.getElementById("ramBar").style.width = ram + "%";
+          document.getElementById("diskVal").textContent = disk + "%";
+          document.getElementById("diskBar").style.width = disk + "%";
+          document.getElementById("tempVal").textContent = (temp > 0 ? temp : "--") + "°C";
+          document.getElementById("tempBar").style.width = Math.min(100, (temp / 80) * 100) + "%";
+        }
+      } catch (e) {
+        // silent on stats failure
+      }
+    }
+
+    async function sendMessage() {
+      const input = document.getElementById("chatInput");
+      const msg = input.value.trim();
+      if (!msg) return;
+
+      appendMessage(msg, "user");
+      input.value = "";
+
+      let endpoint = "/chat/gemini";
+      let body = { message: msg };
+      if (currentAgent === "deepseek") {
+        endpoint = "/chat/deepseek";
+      } else if (currentAgent === "collaborate") {
+        endpoint = "/chat/collaborate";
+        body = { message: msg, primary: "gemini" };
+      }
+
+      const botMsgDiv = appendMessage("Tenker...", "bot");
+      try {
+        const res = await apiFetch(endpoint, {
+          method: "POST",
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (currentAgent === "collaborate") {
+          const prim = data.primary?.reply || "";
+          const rev = data.review?.reply || "";
+          botMsgDiv.innerHTML = `<b>Gemini:</b> ${prim}<br><br><small><b>Kontroll av DeepSeek (${data.review?.verdict || ''}):</b><br>${rev}</small>`;
+        } else {
+          botMsgDiv.textContent = data.reply || data.detail || "Ingen respons";
+        }
+      } catch (e) {
+        botMsgDiv.textContent = "Feil under sending: " + e.message;
+      }
+    }
+
+    function appendMessage(text, sender) {
+      const container = document.getElementById("chatMessages");
+      const div = document.createElement("div");
+      div.className = `message ${sender}`;
+      div.textContent = text;
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
+      return div;
+    }
+
+    async function runAgent() {
+      const goal = document.getElementById("agentGoal").value.trim();
+      const term = document.getElementById("terminalOutput");
+      if (!goal) return alert("Vennligst oppgi et mål");
+
+      term.textContent = `[Agent startet]\nMål: ${goal}\nSender oppgave til serveren...\n`;
+
+      try {
+        const res = await apiFetch("/chat/agent", {
+          method: "POST",
+          body: JSON.stringify({ goal: goal, agent: "gemini", max_steps: 6 })
+        });
+        const data = await res.json();
+        if (data.steps && data.steps.length > 0) {
+          data.steps.forEach(s => {
+            term.textContent += `\n[Steg ${s.step}] Tanke: ${s.thought}\n$ ${s.command}\n${s.stdout || ''}${s.stderr || ''}\n`;
+          });
+        }
+        term.textContent += `\n[Ferdig] Svar: ${data.answer || 'OK'}`;
+      } catch (e) {
+        term.textContent += `\n[Feil]: ${e.message}`;
+      }
+    }
+
+    // Auto init
+    checkStatus();
+    fetchStats();
+    statsInterval = setInterval(() => {
+      fetchStats();
+      checkStatus();
+    }, 3000);
+  </script>
+</body>
+</html>

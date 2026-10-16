@@ -73,7 +73,7 @@ fun DashboardScreen(
                     else -> "El servidor respondió con error ${e.code()}"
                 }
             } catch (e: Exception) {
-                errorMessage = "Error de conexión: Verifica que el servidor de Python esté corriendo"
+                errorMessage = "Error de conexión (${e.javaClass.simpleName}): ${e.message ?: "sin detalle"}"
             } finally {
                 isLoading = false
             }

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Server Box -->
+    <path
+        android:strokeColor="#6366f1"
+        android:strokeWidth="3"
+        android:fillColor="#151d30"
+        android:pathData="M30,34 L78,34 A4,4 0 0,1 82,38 L82,70 A4,4 0 0,1 78,74 L30,74 A4,4 0 0,1 26,70 L26,38 A4,4 0 0,1 30,34 Z" />
+    <!-- Server Line -->
+    <path
+        android:strokeColor="#312e81"
+        android:strokeWidth="2"
+        android:pathData="M26,54 L82,54" />
+    <!-- Indicator Dots -->
+    <path
+        android:fillColor="#10b981"
+        android:pathData="M34,44 A3,3 0 1,0 34,44.01" />
+    <path
+        android:fillColor="#6366f1"
+        android:pathData="M44,44 A3,3 0 1,0 44,44.01" />
+    <!-- Lightning Bolt -->
+    <path
+        android:fillColor="#38bdf8"
+        android:strokeColor="#ffffff"
+        android:strokeWidth="1"
+        android:pathData="M56,36 L48,54 L54,54 L50,72 L64,50 L58,50 Z" />
+</vector>

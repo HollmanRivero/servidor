@@ -1,7 +1,8 @@
 # Sette opp Super-Server på en ny maskin
 
-Kortversjon: kopier repoet til maskinen, kjør `bash deploy/install.sh`, skriv IP og
-token inn i appen. Detaljene under.
+Kortversjon: kopier repoet til maskinen, fyll ut `deploy/config.local`, kjør
+`bash deploy/install.sh`. Skriptet ordner Tailscale, nøkler, token, port og
+app-konfigurasjon. Detaljene under.
 
 ## Forutsetninger
 
@@ -15,6 +16,90 @@ Maskinen som skal være server ("arbeidshesten") må ha:
   Dette er nettverket appen kobler seg til serveren gjennom.
   `install.sh` installerer den automatisk hvis den mangler – du trenger bare
   logge inn med `sudo tailscale up`.
+
+## Automatisk oppsett (anbefalt)
+
+Fyll ut **én** fil, så skriver installasjonsskriptet resten: `.env`, API-token,
+Tailscale-IP, port og appens server-URL.
+
+```bash
+cd ~/Servidor_Super
+cp deploy/config.local.example deploy/config.local
+nano deploy/config.local          # lim inn GEMINI_API_KEY og DEEPSEEK_API_KEY
+bash deploy/install.sh
+```
+
+Skriptet gjør da, i rekkefølge:
+
+1. installerer/aktiverer Tailscale og henter Tailscale-IP-en
+2. skriver `backend/.env` med API-token (genereres), `HOST`, `PORT` og AI-nøklene
+3. lager `.venv`, installerer avhengigheter og systemd-tjenesten `servidor-super`
+4. åpner porten kun på `tailscale0` hvis `ufw` er aktiv
+5. skriver `android_app/local.properties` og `deploy/app_config.json` med
+   server-URL + token, slik at APK-en er ferdig konfigurert
+6. skriver ut adressen, tokenen og svaret fra `/health`
+
+Vil du at serveren **kun** skal lytte på Tailscale: sett `BIND_TAILSCALE_ONLY=yes`
+i `deploy/config.local`.
+
+Bygger du appen på en annen maskin: kopier `deploy/app_config.json` dit og kjør
+`bash deploy/apply-app-config.sh` før `./gradlew assembleDebug`.
+
+Vil du heller skrive URL og token manuelt i appen, viser dette skriptet deg
+alltid riktig IP, port og token:
+
+```bash
+bash deploy/show-connection.sh
+```
+
+## Flyttet repoet til en ny disk / ny sti?
+
+En Python-`.venv` har absolutte stier innbakt og slutter å virke når mappen flyttes
+(`bin/pip` feiler med *bad interpreter*). Et gammelt systemd-oppsett peker også på
+den gamle stien.
+
+`install.sh` oppdager dette selv og lager `.venv` + tjenesten på nytt. Vil du tvinge
+en helt ren installasjon:
+
+```bash
+bash deploy/install.sh --fresh
+```
+
+Sjekk også at `android_app/local.properties` peker på riktig Android SDK hvis du
+bygger appen på denne maskinen (`sdk.dir=...`).
+
+## AI-agentene kan bygge prosjekter på serveren
+
+Når `ENABLE_AGENT_SHELL=yes` står i `deploy/config.local` (og dermed i `.env`), får
+agentene lov til å kjøre shell-kommandoer. Alt kjører med arbeidsmappe inne i
+`backend/projects/`, med timeout (120 s) og kappet output.
+
+Nye endepunkter (alle krever `X-API-Token`):
+
+| Endepunkt | Gjør |
+|---|---|
+| `POST /projects/create` | Lager en prosjektmappe (+ `README.md` og `git init`) |
+| `POST /shell` | Kjører én kommando, f.eks. `{"command": "npm init -y", "cwd": "mitt-prosjekt"}` |
+| `POST /chat/agent` | Autonom løkke: agenten foreslår én kommando, serveren kjører den, resultatet føres tilbake, til målet er nådd |
+
+I appen: åpne chatten og velg **🛠 Agent**. Beskriv hva som skal bygges, f.eks.
+*«Lag et Python-prosjekt kalt hello med et script som skriver hei, og test at det kjører.»*
+Du ser hver kommando og outputen rett i chatten.
+
+Eksempel med curl:
+
+```bash
+TOKEN=$(grep '^API_TOKEN=' backend/.env | cut -d= -f2-)
+curl -s -X POST http://127.0.0.1:8000/chat/agent \
+  -H "X-API-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"message":"Lag et Python-prosjekt kalt hello som skriver hei","agent":"gemini","max_steps":6}' \
+  | python3 -m json.tool
+```
+
+> **Sikkerhet:** med `ENABLE_AGENT_SHELL=yes` kan alle som har `API_TOKEN` kjøre
+> vilkårlige kommandoer som din bruker på maskinen. Ha porten kun på Tailscale,
+> og bytt token hvis den har vært eksponert. Er den ikke det, sett
+> `ENABLE_AGENT_SHELL=no` — da svarer `/shell` og `/chat/agent` med 403.
 
 ## Steg for steg
 
@@ -153,9 +238,10 @@ I appen, trykk tannhjulet og fyll inn:
 - **URL del Servidor**: `http://<tailscale-ip>:8000`
 - **X-API-Token**: verdien fra `backend/.env` (`grep API_TOKEN backend/.env`)
 
-IP-en er hardkodet som *standard* i `RetrofitClient`, men alt du skriver i
-innstillingene lagres og overstyrer den. **Du trenger altså ikke bygge appen
-på nytt bare fordi IP-en har endret seg.**
+IP-en og tokenen bakes inn i APK-en fra `android_app/local.properties` (skrevet av
+`deploy/install.sh`), så appen er ferdig konfigurert etter installasjon. Alt du
+skriver i innstillingene (tannhjulet) lagres og **overstyrer** standardverdien.
+Du trenger derfor ikke bygge appen på nytt bare fordi IP-en har endret seg.
 
 ## Hvis serveren er en virtuell maskin
 
