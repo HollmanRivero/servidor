@@ -67,13 +67,11 @@ fun DashboardScreen(
                 projects = response.items.sortedBy { !it.is_dir }
             } catch (e: HttpException) {
                 errorMessage = when (e.code()) {
-                    401 -> "Økten er ugyldig eller utløpt - logg ut og inn igjen"
-                    402 -> "Abonnementet er utløpt"
-                    403 -> "Kontoen er bannet"
-                    else -> "El servidor respondió con error ${e.code()}"
+                    401 -> "Feil X-API-Token (401) – trykk på ⚙️ for å sjekke X-API-Token (f.eks. servidor123)"
+                    else -> "Serveren svarte med feil ${e.code()}"
                 }
             } catch (e: Exception) {
-                errorMessage = "Error de conexión (${e.javaClass.simpleName}): ${e.message ?: "sin detalle"}"
+                errorMessage = "Kunne ikke koble til (${e.javaClass.simpleName}): ${e.message ?: "sjekk Tailscale IP"}"
             } finally {
                 isLoading = false
             }
@@ -89,29 +87,23 @@ fun DashboardScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("Mi Servidor Ubuntu", color = LightText)
-                        val user = prefs.getString("username", null)
-                        if (user != null) {
-                            Text(user, color = LightText, style = MaterialTheme.typography.labelSmall)
-                        }
+                        Text("Super-Server Ubuntu", color = LightText)
+                        Text(RetrofitClient.BASE_URL, color = Color.Gray, style = MaterialTheme.typography.labelSmall)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = DarkBackground
                 ),
                 actions = {
-                    TextButton(onClick = onLogout) {
-                        Text("Logg ut", color = Color(0xFFFF5252))
-                    }
                     IconButton(onClick = {
                         tempIp = RetrofitClient.BASE_URL
                         tempToken = RetrofitClient.API_TOKEN
                         showIpDialog = true
                     }) {
-                        Icon(Icons.Default.Settings, contentDescription = "Configurar servidor", tint = LightText)
+                        Icon(Icons.Default.Settings, contentDescription = "Konfigurer server", tint = LightText)
                     }
                     IconButton(onClick = { loadData() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Actualizar", tint = LightText)
+                        Icon(Icons.Default.Refresh, contentDescription = "Oppdater", tint = LightText)
                     }
                 }
             )

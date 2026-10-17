@@ -1,7 +1,6 @@
 package com.pepito.servidor.network
 
 import com.google.gson.annotations.SerializedName
-import com.pepito.servidor.BuildConfig
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -9,6 +8,7 @@ import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Query
+import java.util.concurrent.TimeUnit
 
 data class ServerStats(
     val cpu_percent: Float,
@@ -60,11 +60,11 @@ data class RecentChangesResponse(
     val recent: List<RecentFile>
 )
 
-// --- Samarbeid mellom de to agentene ---
+// --- Samarbeid mellom agentene ---
 
 data class CollaborateRequest(
     val message: String,
-    val primary: String   // "gemini" eller "deepseek" - hvem som svarer brukeren
+    val primary: String   // "gemini", "deepseek" eller "techai"
 )
 
 data class AgentAnswer(
@@ -84,63 +84,37 @@ data class CollaborateResponse(
     val question: String = "",
     val primary: AgentAnswer,
     val review: ReviewResult,
-    // "final" er et nokkelord i Kotlin, derfor SerializedName
     @SerializedName("final") val finalAnswer: AgentAnswer? = null
 )
 
-// --- Agent med verktøy + minne ---
+// --- Autonom kodeagent (/chat/agent) ---
 
-data class ToolCall(
-    val tool: String = "",
-    val arguments: Map<String, Any?> = emptyMap(),
-    val result: String = ""
+data class AgentTaskRequest(
+    val goal: String,
+    val project: String = "",
+    val primary: String = "gemini",
+    val review_with_other: Boolean = true,
+    val max_steps: Int = 30
 )
 
-data class AgentRequest(
-    val message: String,
-    val provider: String,       // "gemini" eller "deepseek"
-    val conversation_id: String? = null
+data class AgentStepLog(
+    val step: Int = 0,
+    val action: String = "",
+    val thought: String = "",
+    val target: String = "",
+    val result: String = "",
+    val ok: Boolean = true
 )
 
-data class AgentResponse(
-    val conversation_id: String = "",
-    val reply: String = "",
+data class AgentTaskResponse(
+    val goal: String = "",
+    val project: String = "",
+    val primary: String = "",
     val model: String? = null,
-    val provider: String = "",
-    val tool_calls: List<ToolCall> = emptyList()
-)
-
-// --- Autentisering (login/register med JWT) ---
-
-data class UserInfo(
-    val id: String = "",
-    val username: String = "",
-    val role: String = "",
-    val is_vip: Boolean = false
-)
-
-data class LoginRequest(
-    val username: String,
-    val password: String
-)
-
-data class LoginResponse(
-    val token: String = "",
-    val user: UserInfo? = null,
-    val access: String = "",
-    val reason: String = ""
-)
-
-data class RegisterRequest(
-    val username: String,
-    val password: String,
-    val email: String? = null
-)
-
-data class RegisterResponse(
-    val id: String = "",
-    val username: String = "",
-    val role: String = ""
+    val done: Boolean = false,
+    val summary: String = "",
+    val steps: List<AgentStepLog> = emptyList(),
+    val review: ReviewResult? = null
 )
 
 interface ServerApiService {
@@ -161,66 +135,62 @@ interface ServerApiService {
 
     @POST("chat/deepseek")
     suspend fun chatWithDeepseek(@Body request: ChatRequest): ChatResponse
-    
+
+    @POST("chat/techai")
+    suspend fun chatWithTechAi(@Body request: ChatRequest): ChatResponse
+
     @GET("recent_changes")
     suspend fun getRecentChanges(): RecentChangesResponse
 
     @POST("chat/collaborate")
     suspend fun collaborate(@Body request: CollaborateRequest): CollaborateResponse
 
-    @POST("agent")
-    suspend fun agentChat(@Body request: AgentRequest): AgentResponse
-
-    @POST("auth/login")
-    suspend fun login(@Body request: LoginRequest): LoginResponse
-
-    @POST("auth/register")
-    suspend fun register(@Body request: RegisterRequest): RegisterResponse
+    @POST("chat/agent")
+    suspend fun runAgent(@Body request: AgentTaskRequest): AgentTaskResponse
 }
 
 object RetrofitClient {
-    // Standard server (Tailscale): smart-things-hesr. Kan overstyres i appens innstillinger.
-    private var _baseUrl = "http://100.68.2.32:8000/"
+    private fun normalizeBaseUrl(raw: String): String {
+        var u = raw.trim()
+        if (u.isEmpty()) return ""
+        if (!u.startsWith("http://") && !u.startsWith("https://")) {
+            u = "http://$u"
+        }
+        if (!u.endsWith("/")) {
+            u = "$u/"
+        }
+        return u
+    }
+
+    // Standard Tailscale-server (kan endres i appen)
+    private var _baseUrl = "http://100.115.248.101:8000/"
     var BASE_URL: String
         get() = _baseUrl
         set(value) {
             val normalized = normalizeBaseUrl(value)
             if (normalized.isNotEmpty()) {
                 _baseUrl = normalized
-                _api = null // Reset api to recreate with new URL
+                _api = null
             }
         }
 
-    // Delt hemmelighet fra backend/.env (API_TOKEN). Ma vaere identisk paa begge sider.
-    private var _apiToken: String = BuildConfig.API_TOKEN.trim()
+    // Standard X-API-Token (kan endres i appen)
+    private var _apiToken: String = "servidor123"
     var API_TOKEN: String
         get() = _apiToken
         set(value) {
             _apiToken = value.trim()
-            _api = null // Reset api so the new token is used
-        }
-
-    // JWT fra /auth/login. Sendes som Authorization: Bearer <token>.
-    private var _jwtToken = ""
-    var JWT_TOKEN: String
-        get() = _jwtToken
-        set(value) {
-            _jwtToken = value.trim()
             _api = null
         }
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(600, java.util.concurrent.TimeUnit.SECONDS)
-            .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(600, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val builder = chain.request().newBuilder()
-                if (_jwtToken.isNotEmpty()) {
-                    builder.header("Authorization", "Bearer $_jwtToken")
-                }
                 if (_apiToken.isNotEmpty()) {
-                    // Sendes som X-API-Token paa alle kall til serveren
                     builder.header("X-API-Token", _apiToken)
                 }
                 chain.proceed(builder.build())

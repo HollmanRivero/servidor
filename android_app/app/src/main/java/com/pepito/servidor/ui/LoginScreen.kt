@@ -2,9 +2,6 @@ package com.pepito.servidor.ui
 
 import android.content.Context
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -12,70 +9,49 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import com.pepito.servidor.network.LoginRequest
-import com.pepito.servidor.network.RegisterRequest
 import com.pepito.servidor.network.RetrofitClient
 import com.pepito.servidor.ui.theme.DarkBackground
 import com.pepito.servidor.ui.theme.LightText
 import com.pepito.servidor.ui.theme.NeonBlue
 import kotlinx.coroutines.launch
-import retrofit2.HttpException
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LoginScreen(onLoggedIn: () -> Unit) {
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var isRegister by remember { mutableStateOf(false) }
-    var isLoading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var showSettings by remember { mutableStateOf(false) }
-    var tempIp by remember { mutableStateOf(RetrofitClient.BASE_URL) }
-    var tempToken by remember { mutableStateOf(RetrofitClient.API_TOKEN) }
-
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("server_prefs", Context.MODE_PRIVATE) }
     val scope = rememberCoroutineScope()
 
-    fun doAuth() {
-        if (username.isBlank() || password.isBlank()) {
-            error = "Fyll inn brukernavn og passord"
+    var serverUrl by remember {
+        mutableStateOf(prefs.getString("server_ip", RetrofitClient.BASE_URL) ?: "http://100.115.248.101:8000")
+    }
+    var apiToken by remember {
+        mutableStateOf(prefs.getString("api_token", RetrofitClient.API_TOKEN) ?: "servidor123")
+    }
+    var isLoading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun connectToServer() {
+        if (serverUrl.isBlank() || apiToken.isBlank()) {
+            error = "Skriv inn Tailscale Server IP og X-API-Token"
             return
         }
         isLoading = true
         error = null
+        RetrofitClient.BASE_URL = serverUrl.trim()
+        RetrofitClient.API_TOKEN = apiToken.trim()
+        prefs.edit()
+            .putString("server_ip", RetrofitClient.BASE_URL)
+            .putString("api_token", RetrofitClient.API_TOKEN)
+            .apply()
+
         scope.launch {
             try {
-                val token: String
-                val name: String
-                if (isRegister) {
-                    RetrofitClient.api.register(RegisterRequest(username.trim(), password))
-                    val resp = RetrofitClient.api.login(LoginRequest(username.trim(), password))
-                    token = resp.token
-                    name = resp.user?.username ?: username.trim()
-                } else {
-                    val resp = RetrofitClient.api.login(LoginRequest(username.trim(), password))
-                    token = resp.token
-                    name = resp.user?.username ?: username.trim()
-                }
-                RetrofitClient.JWT_TOKEN = token
-                prefs.edit()
-                    .putString("auth_token", token)
-                    .putString("username", name)
-                    .apply()
+                RetrofitClient.api.getStats()
                 onLoggedIn()
-            } catch (e: HttpException) {
-                error = when (e.code()) {
-                    401 -> "Feil brukernavn eller passord"
-                    403 -> "Kontoen er bannet"
-                    409 -> "Brukernavnet er allerede i bruk"
-                    else -> "Serveren svarte med feil ${e.code()}"
-                }
             } catch (e: Exception) {
-                error = "Kunne ikke nå serveren: ${e.message}"
+                error = "Kunne ikke koble til (${e.message}). Sjekk Tailscale IP og X-API-Token."
             } finally {
                 isLoading = false
             }
@@ -85,16 +61,7 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Super-Server", fontWeight = FontWeight.Bold, color = LightText) },
-                actions = {
-                    IconButton(onClick = {
-                        tempIp = RetrofitClient.BASE_URL
-                        tempToken = RetrofitClient.API_TOKEN
-                        showSettings = true
-                    }) {
-                        Icon(Icons.Default.Settings, contentDescription = "Innstillinger", tint = LightText)
-                    }
-                },
+                title = { Text("Super-Server Tilkobling", fontWeight = FontWeight.Bold, color = LightText) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBackground)
             )
         },
@@ -109,27 +76,32 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
             verticalArrangement = Arrangement.Center
         ) {
             Text(
-                text = if (isRegister) "Lag ny bruker" else "Logg inn",
+                text = "Koble til Tailscale-server",
                 color = LightText,
-                style = MaterialTheme.typography.headlineSmall
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Skriv inn serverens Tailscale IP-adresse og X-API-Token",
+                color = Color.Gray,
+                style = MaterialTheme.typography.bodyMedium
             )
             Spacer(modifier = Modifier.height(24.dp))
 
             OutlinedTextField(
-                value = username,
-                onValueChange = { username = it },
-                label = { Text("Brukernavn") },
+                value = serverUrl,
+                onValueChange = { serverUrl = it },
+                label = { Text("Tailscale Server URL (f.eks. http://100.115.248.101:8000)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(modifier = Modifier.height(12.dp))
             OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
-                label = { Text("Passord") },
+                value = apiToken,
+                onValueChange = { apiToken = it },
+                label = { Text("X-API-Token (f.eks. servidor123)") },
                 singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -140,69 +112,17 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
 
             Spacer(modifier = Modifier.height(24.dp))
             Button(
-                onClick = { doAuth() },
+                onClick = { connectToServer() },
                 enabled = !isLoading,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = NeonBlue)
             ) {
                 if (isLoading) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), color = DarkBackground)
                 } else {
-                    Text(if (isRegister) "Registrer" else "Logg inn")
+                    Text("Lagre & Koble til", color = DarkBackground, fontWeight = FontWeight.Bold)
                 }
-            }
-
-            TextButton(onClick = { isRegister = !isRegister; error = null }) {
-                Text(
-                    if (isRegister) "Har du konto? Logg inn" else "Ingen konto? Registrer deg",
-                    color = NeonBlue
-                )
             }
         }
-    }
-
-    if (showSettings) {
-        AlertDialog(
-            onDismissRequest = { showSettings = false },
-            title = { Text("Konfigurer server") },
-            text = {
-                Column {
-                    Text("URL til serveren (f.eks. http://100.68.2.32:8000)")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    TextField(
-                        value = tempIp,
-                        onValueChange = { tempIp = it },
-                        label = { Text("URL del Servidor") },
-                        singleLine = true
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text("Master-token (API_TOKEN fra backend/.env) - valgfri for admin")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    TextField(
-                        value = tempToken,
-                        onValueChange = { tempToken = it },
-                        label = { Text("X-API-Token") },
-                        singleLine = true
-                    )
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    RetrofitClient.BASE_URL = tempIp
-                    RetrofitClient.API_TOKEN = tempToken
-                    prefs.edit()
-                        .putString("server_ip", tempIp)
-                        .putString("api_token", tempToken.trim())
-                        .apply()
-                    showSettings = false
-                }) {
-                    Text("Lagre")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSettings = false }) {
-                    Text("Avbryt")
-                }
-            }
-        )
     }
 }

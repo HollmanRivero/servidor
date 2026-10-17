@@ -3,9 +3,9 @@ package com.pepito.servidor.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -17,7 +17,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.pepito.servidor.network.AgentRequest
+import com.pepito.servidor.network.AgentTaskRequest
+import com.pepito.servidor.network.ChatRequest
 import com.pepito.servidor.network.CollaborateRequest
 import com.pepito.servidor.network.RetrofitClient
 import kotlinx.coroutines.launch
@@ -28,16 +29,18 @@ data class ChatMessage(val text: String, val isUser: Boolean, val senderName: St
 @Composable
 fun ChatScreen(onNavigateBack: () -> Unit) {
     var selectedAI by remember { mutableStateOf("Gemini") }
-    // true = begge jobber sammen: den valgte svarer, den andre kontrollerer og retter
     var collaborateMode by remember { mutableStateOf(false) }
-    // true = agenten kjorer kommandoer paa serveren (krever ENABLE_AGENT_SHELL=1)
     var agentMode by remember { mutableStateOf(false) }
-    var messages by remember { mutableStateOf(listOf(
-        ChatMessage("Hei! Hvilken AI vil du prate med i dag?", false, "System")
-    )) }
+    var projectName by remember { mutableStateOf("") }
+    var messages by remember {
+        mutableStateOf(
+            listOf(
+                ChatMessage("Hei! Hvilken AI vil du prate med i dag?", false, "System")
+            )
+        )
+    }
     var inputText by remember { mutableStateOf("") }
     var isTyping by remember { mutableStateOf(false) }
-    var conversationId by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     fun sendMessage(text: String) {
@@ -48,62 +51,120 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
         isTyping = true
         scope.launch {
             try {
-                // Sjekk om det er spørsmål om nylige endringer
                 var finalPrompt = userText
                 if (userText.contains("Hva er nytt") || userText.contains("sist endrede filen")) {
                     try {
                         val changes = RetrofitClient.api.getRecentChanges()
                         val filesList = changes.recent.joinToString(", ") { it.path }
                         finalPrompt = "$userText\n\nHer er filene som nylig er endret: $filesList"
-                    } catch (e: Exception) {
-                        // Ignorer feil her, send original prompt
+                    } catch (_: Exception) {
                     }
                 }
 
-                if (collaborateMode) {
-                    // Begge agentene: den valgte svarer, den andre kontrollerer og retter
-                    val result = RetrofitClient.api.collaborate(
-                        CollaborateRequest(
-                            message = finalPrompt,
-                            primary = selectedAI.lowercase()
-                        )
-                    )
-
-                    messages = messages + ChatMessage(
-                        result.primary.reply, false, result.primary.agent
-                    )
-
-                    val badge = when (result.review.verdict.uppercase()) {
-                        "FEIL" -> "⚠️ Fant feil"
-                        "AVBRUTT" -> "⏹️ Avbrutt"
-                        else -> "✅ Godkjent"
+                when {
+                    agentMode -> {
+                        var currentGoal = finalPrompt
+                        var currentProject = projectName.trim()
+                        var round = 1
+                        val maxRounds = 3
+                        while (round <= maxRounds) {
+                            val result = RetrofitClient.api.runAgent(
+                                AgentTaskRequest(
+                                    goal = currentGoal,
+                                    project = currentProject,
+                                    primary = selectedAI.lowercase(),
+                                    review_with_other = true,
+                                    max_steps = 30
+                                )
+                            )
+                            if (result.project.isNotBlank()) {
+                                currentProject = result.project
+                                projectName = result.project
+                            }
+                            val stepsText = if (result.steps.isEmpty()) {
+                                "(ingen steg ble kjørt)"
+                            } else {
+                                result.steps.joinToString("\n\n") { step ->
+                                    val icon = if (step.ok) "✅" else "❌"
+                                    val header = "$icon Steg ${step.step} · ${step.action}" +
+                                        if (step.target.isNotBlank()) " · ${step.target}" else ""
+                                    val thought = if (step.thought.isNotBlank()) "\n💭 ${step.thought}" else ""
+                                    val out = if (step.result.isNotBlank()) "\n${step.result.take(900)}" else ""
+                                    header + thought + out
+                                }
+                            }
+                            messages = messages + ChatMessage(
+                                "📁 Prosjekt: ${result.project} (runde $round)\n\n$stepsText",
+                                false,
+                                "${result.primary.ifBlank { selectedAI }} (agent)"
+                            )
+                            val statusLine = if (result.done) "✅ Oppgave fullført" else "⏳ Fortsetter automatisk..."
+                            messages = messages + ChatMessage(
+                                "$statusLine\n\n${result.summary}",
+                                false,
+                                result.primary.ifBlank { selectedAI }
+                            )
+                            result.review?.let { rev ->
+                                val badge = when (rev.verdict.uppercase()) {
+                                    "FEIL" -> "⚠️ Fant feil"
+                                    "AVBRUTT" -> "⏹️ Avbrutt"
+                                    else -> "✅ Godkjent"
+                                }
+                                messages = messages + ChatMessage(
+                                    "$badge\n\n${rev.reply}",
+                                    false,
+                                    "${rev.agent} (kontroll)"
+                                )
+                            }
+                            if (result.done) break
+                            round++
+                            if (round <= maxRounds) {
+                                currentGoal = "Fortsett og fullfør oppgaven helt ferdig i prosjektet '$currentProject'. Opprinnelig mål: $finalPrompt"
+                            }
+                        }
                     }
-                    messages = messages + ChatMessage(
-                        "$badge\n\n${result.review.reply}",
-                        false,
-                        "${result.review.agent} (kontroll)"
-                    )
 
-                    result.finalAnswer?.let { fix ->
+                    collaborateMode -> {
+                        val result = RetrofitClient.api.collaborate(
+                            CollaborateRequest(
+                                message = finalPrompt,
+                                primary = selectedAI.lowercase()
+                            )
+                        )
                         messages = messages + ChatMessage(
-                            fix.reply, false, "${fix.agent} (rettet)"
+                            result.primary.reply, false, result.primary.agent
                         )
-                    }
-                } else {
-                    // Agenten: AI-en velger verktøy, utfører og svarer med hva den gjorde
-                    val result = RetrofitClient.api.agentChat(
-                        AgentRequest(
-                            message = finalPrompt,
-                            provider = selectedAI.lowercase(),
-                            conversation_id = conversationId
+                        val badge = when (result.review.verdict.uppercase()) {
+                            "FEIL" -> "⚠️ Fant feil"
+                            "AVBRUTT" -> "⏹️ Avbrutt"
+                            else -> "✅ Godkjent"
+                        }
+                        messages = messages + ChatMessage(
+                            "$badge\n\n${result.review.reply}",
+                            false,
+                            "${result.review.agent} (kontroll)"
                         )
-                    )
-                    conversationId = result.conversation_id
-                    if (result.tool_calls.isNotEmpty()) {
-                        val toolText = result.tool_calls.joinToString("\n") { "🔧 ${it.tool}" }
-                        messages = messages + ChatMessage(toolText, false, "Verktøy")
+                        result.finalAnswer?.let { fix ->
+                            messages = messages + ChatMessage(
+                                fix.reply, false, "${fix.agent} (rettet)"
+                            )
+                        }
                     }
-                    messages = messages + ChatMessage(result.reply, false, selectedAI)
+
+                    selectedAI == "Gemini" -> {
+                        val response = RetrofitClient.api.chatWithGemini(ChatRequest(finalPrompt))
+                        messages = messages + ChatMessage(response.reply, false, "Gemini")
+                    }
+
+                    selectedAI == "Tech-AI" -> {
+                        val response = RetrofitClient.api.chatWithTechAi(ChatRequest(finalPrompt))
+                        messages = messages + ChatMessage(response.reply, false, "Tech-AI")
+                    }
+
+                    else -> {
+                        val response = RetrofitClient.api.chatWithDeepseek(ChatRequest(finalPrompt))
+                        messages = messages + ChatMessage(response.reply, false, "DeepSeek")
+                    }
                 }
             } catch (e: Exception) {
                 messages = messages + ChatMessage("Feil: Kunne ikke nå $selectedAI (${e.message})", false, "System")
@@ -133,7 +194,6 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // AI Velger
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -162,6 +222,16 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 FilterChip(
+                    selected = selectedAI == "Tech-AI" && !collaborateMode && !agentMode,
+                    onClick = {
+                        selectedAI = "Tech-AI"
+                        collaborateMode = false
+                        agentMode = false
+                    },
+                    label = { Text("Tech-AI") }
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                FilterChip(
                     selected = collaborateMode,
                     onClick = {
                         collaborateMode = true
@@ -179,8 +249,24 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                     label = { Text("🛠 Agent") }
                 )
             }
-            
-            // Hurtigknapper for Samarbeid
+
+            if (agentMode) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextField(
+                        value = projectName,
+                        onValueChange = { projectName = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("Prosjektmappe (valgfri, f.eks. min-nettside)") }
+                    )
+                }
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -221,8 +307,8 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                 if (isTyping) {
                     item {
                         val whoTalks = when {
-                            agentMode -> "${selectedAI}-agenten jobber paa serveren"
-                            collaborateMode -> "Gemini og DeepSeek samarbeider"
+                            agentMode -> "${selectedAI}-agenten jobber på serveren"
+                            collaborateMode -> "AI-agentene samarbeider"
                             else -> selectedAI
                         }
                         Text("$whoTalks skriver...", color = Color.Gray, modifier = Modifier.padding(8.dp))
@@ -248,9 +334,10 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                     shape = RoundedCornerShape(24.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                FloatingActionButton(
+                IconButton(
                     onClick = { sendMessage(inputText) },
-                    containerColor = MaterialTheme.colorScheme.primary
+                    modifier = Modifier
+                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(50))
                 ) {
                     Icon(Icons.Default.Send, contentDescription = "Send", tint = Color.White)
                 }
@@ -261,28 +348,30 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
 
 @Composable
 fun ChatBubble(message: ChatMessage) {
-    val alignment = if (message.isUser) Alignment.CenterEnd else Alignment.CenterStart
-    val color = if (message.isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
-    val textColor = if (message.isUser) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
-
-    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = alignment) {
-        Column(horizontalAlignment = if (message.isUser) Alignment.End else Alignment.Start) {
-            if (!message.isUser) {
-                Text(
-                    text = message.senderName,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.Gray,
-                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp)
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .background(color, RoundedCornerShape(16.dp))
-                    .padding(12.dp)
-                    .widthIn(max = 280.dp)
-            ) {
-                Text(text = message.text, color = textColor)
-            }
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = if (message.isUser) Alignment.End else Alignment.Start
+    ) {
+        Text(
+            text = message.senderName,
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.Gray,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+        )
+        Surface(
+            color = if (message.isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
+            shape = RoundedCornerShape(
+                topStart = 16.dp,
+                topEnd = 16.dp,
+                bottomStart = if (message.isUser) 16.dp else 0.dp,
+                bottomEnd = if (message.isUser) 0.dp else 16.dp
+            )
+        ) {
+            Text(
+                text = message.text,
+                modifier = Modifier.padding(12.dp),
+                color = if (message.isUser) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
+            )
         }
     }
 }
