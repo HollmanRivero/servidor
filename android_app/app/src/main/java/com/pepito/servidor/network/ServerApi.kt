@@ -183,6 +183,21 @@ data class ResolveErrorRequest(
     val error_id: String = "all"
 )
 
+data class ShellRequest(
+    val command: String,
+    val cwd: String = "",
+    val timeout: Int = 120
+)
+
+data class ShellResponse(
+    val command: String = "",
+    val exit_code: Int = 0,
+    val stdout: String = "",
+    val stderr: String = "",
+    val cwd: String = "",
+    val os: String = ""
+)
+
 interface ServerApiService {
     @GET("stats")
     suspend fun getStats(): ServerStats
@@ -213,6 +228,9 @@ interface ServerApiService {
 
     @POST("chat/agent")
     suspend fun runAgent(@Body request: AgentTaskRequest): AgentTaskResponse
+
+    @POST("shell")
+    suspend fun runShell(@Body request: ShellRequest): ShellResponse
 
     @POST("auth/login")
     suspend fun login(@Body request: LoginRequest): LoginResponse

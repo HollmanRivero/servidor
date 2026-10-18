@@ -21,6 +21,7 @@ import com.pepito.servidor.network.AgentTaskRequest
 import com.pepito.servidor.network.ChatRequest
 import com.pepito.servidor.network.CollaborateRequest
 import com.pepito.servidor.network.RetrofitClient
+import com.pepito.servidor.network.ShellRequest
 import kotlinx.coroutines.launch
 
 data class ChatMessage(val text: String, val isUser: Boolean, val senderName: String = "Du")
@@ -30,18 +31,75 @@ data class ChatMessage(val text: String, val isUser: Boolean, val senderName: St
 fun ChatScreen(onNavigateBack: () -> Unit) {
     var selectedAI by remember { mutableStateOf("Gemini") }
     var collaborateMode by remember { mutableStateOf(false) }
-    var agentMode by remember { mutableStateOf(false) }
-    var projectName by remember { mutableStateOf("") }
+    var agentMode by remember { mutableStateOf(true) }
+    var projectName by remember { mutableStateOf("servidor") }
+    var availableProjects by remember { mutableStateOf(listOf("servidor", "~")) }
+    var shellCommand by remember { mutableStateOf("") }
     var messages by remember {
         mutableStateOf(
             listOf(
-                ChatMessage("Hei! Hvilken AI vil du prate med i dag?", false, "System")
+                ChatMessage(
+                    "Hei! Agent-modus med full serverkontroll (Linux, macOS og Windows) er klar. " +
+                        "Velg AI (Gemini, DeepSeek eller Tech-AI), velg prosjekt (f.eks. servidor), " +
+                        "og skriv hva agenten skal utføre eller kjør en kommando direkte.",
+                    false,
+                    "System"
+                )
             )
         )
     }
     var inputText by remember { mutableStateOf("") }
     var isTyping by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        try {
+            val res = RetrofitClient.api.listProjects("")
+            val dirs = res.items.filter { it.is_dir }.map { it.path }
+            val merged = (listOf("servidor", "~") + dirs).distinct()
+            availableProjects = merged
+        } catch (_: Exception) {
+        }
+    }
+
+    fun runDirectShellCommand(cmd: String) {
+        val cleanCmd = cmd.trim()
+        if (cleanCmd.isEmpty() || isTyping) return
+        val targetProj = projectName.trim().ifEmpty { "servidor" }
+        messages = messages + ChatMessage("💻 [$targetProj] $ $cleanCmd", true)
+        shellCommand = ""
+        isTyping = true
+        scope.launch {
+            try {
+                val res = RetrofitClient.api.runShell(
+                    ShellRequest(
+                        command = cleanCmd,
+                        cwd = targetProj,
+                        timeout = 180
+                    )
+                )
+                val statusIcon = if (res.exit_code == 0) "✅" else "❌"
+                val outPart = if (res.stdout.isNotBlank()) "\nSTDOUT:\n${res.stdout.trim()}" else ""
+                val errPart = if (res.stderr.isNotBlank()) "\nSTDERR:\n${res.stderr.trim()}" else ""
+                val body = if (outPart.isEmpty() && errPart.isEmpty()) "\n(kommando utført uten output)" else "$outPart$errPart"
+                messages = messages + ChatMessage(
+                    "$statusIcon Kommando i '${res.cwd.ifBlank { targetProj }}' (exit ${res.exit_code}):$body",
+                    false,
+                    "Terminal (${res.os.ifBlank { "Server" }})"
+                )
+            } catch (e: Exception) {
+                val errMsg = "Feil ved kjøring av kommando: ${e.message}"
+                messages = messages + ChatMessage(errMsg, false, "Terminal")
+                RetrofitClient.reportAppError(
+                    message = errMsg,
+                    endpoint = "POST /shell ($targetProj)",
+                    details = e.toString()
+                )
+            } finally {
+                isTyping = false
+            }
+        }
+    }
 
     fun sendMessage(text: String) {
         if (text.isBlank() || isTyping) return
@@ -64,7 +122,7 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                 when {
                     agentMode -> {
                         var currentGoal = finalPrompt
-                        var currentProject = projectName.trim()
+                        var currentProject = projectName.trim().ifEmpty { "servidor" }
                         var round = 1
                         val maxRounds = 3
                         while (round <= maxRounds) {
@@ -171,7 +229,7 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                 messages = messages + ChatMessage(errMsg, false, "System")
                 RetrofitClient.reportAppError(
                     message = errMsg,
-                    endpoint = "Chat ($selectedAI)",
+                    endpoint = if (agentMode) "POST /chat/agent ($selectedAI)" else "Chat ($selectedAI)",
                     details = e.toString()
                 )
             } finally {
@@ -200,52 +258,33 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            // Rad 1: Velg AI-modell (skrur ALDRI av Agent-modus når du bytter mellom Gemini, DeepSeek og Tech-AI!)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
-                    .padding(8.dp),
-                horizontalArrangement = Arrangement.Center
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 FilterChip(
-                    selected = selectedAI == "Gemini" && !collaborateMode && !agentMode,
-                    onClick = {
-                        selectedAI = "Gemini"
-                        collaborateMode = false
-                        agentMode = false
-                    },
-                    label = { Text("Gemini") }
+                    selected = selectedAI == "Gemini",
+                    onClick = { selectedAI = "Gemini" },
+                    label = { Text("🤖 Gemini") }
                 )
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 FilterChip(
-                    selected = selectedAI == "DeepSeek" && !collaborateMode && !agentMode,
-                    onClick = {
-                        selectedAI = "DeepSeek"
-                        collaborateMode = false
-                        agentMode = false
-                    },
-                    label = { Text("DeepSeek") }
+                    selected = selectedAI == "DeepSeek",
+                    onClick = { selectedAI = "DeepSeek" },
+                    label = { Text("🤖 DeepSeek") }
                 )
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 FilterChip(
-                    selected = selectedAI == "Tech-AI" && !collaborateMode && !agentMode,
-                    onClick = {
-                        selectedAI = "Tech-AI"
-                        collaborateMode = false
-                        agentMode = false
-                    },
-                    label = { Text("Tech-AI") }
+                    selected = selectedAI == "Tech-AI",
+                    onClick = { selectedAI = "Tech-AI" },
+                    label = { Text("🤖 Tech-AI") }
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                FilterChip(
-                    selected = collaborateMode,
-                    onClick = {
-                        collaborateMode = true
-                        agentMode = false
-                    },
-                    label = { Text("🤝 Begge") }
-                )
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(10.dp))
                 FilterChip(
                     selected = agentMode,
                     onClick = {
@@ -254,13 +293,55 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                     },
                     label = { Text("🛠 Agent") }
                 )
+                Spacer(modifier = Modifier.width(6.dp))
+                FilterChip(
+                    selected = !agentMode && !collaborateMode,
+                    onClick = {
+                        agentMode = false
+                        collaborateMode = false
+                    },
+                    label = { Text("💬 Chat") }
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                FilterChip(
+                    selected = collaborateMode,
+                    onClick = {
+                        collaborateMode = true
+                        agentMode = false
+                    },
+                    label = { Text("🤝 Begge") }
+                )
             }
 
             if (agentMode) {
+                // Hurtigvalg av eksisterende prosjekter på serveren (inkl. servidor)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Velg prosjekt:",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(end = 6.dp)
+                    )
+                    availableProjects.forEach { proj ->
+                        FilterChip(
+                            selected = projectName.trim() == proj,
+                            onClick = { projectName = proj },
+                            label = { Text("📁 $proj") },
+                            modifier = Modifier.padding(end = 6.dp)
+                        )
+                    }
+                }
+
+                // Prosjektmappe-felt
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextField(
@@ -268,8 +349,32 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                         onValueChange = { projectName = it },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        placeholder = { Text("Prosjektmappe (valgfri, f.eks. min-nettside)") }
+                        label = { Text("Aktiv prosjektmappe / sti på serveren") },
+                        placeholder = { Text("f.eks. servidor, ~, eller prosjektnavn") }
                     )
+                }
+
+                // Direkte kommandokjøring under Velg prosjekt i Agent-fanen
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextField(
+                        value = shellCommand,
+                        onValueChange = { shellCommand = it },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        placeholder = { Text("💻 Kjør kommando i '$projectName' (git, ls, dir, python...)") }
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = { runDirectShellCommand(shellCommand) },
+                        enabled = !isTyping && shellCommand.isNotBlank()
+                    ) {
+                        Text("Kjør")
+                    }
                 }
             }
 
@@ -290,8 +395,7 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                 Spacer(modifier = Modifier.width(8.dp))
                 Button(
                     onClick = {
-                        collaborateMode = true
-                        sendMessage("Den andre AI-en har nettopp gjort endringer i koden vår. Sjekk den sist endrede filen for feil og rett det opp.")
+                        sendMessage("Sjekk filene i prosjektet '$projectName' for feil og rett dem opp.")
                     },
                     modifier = Modifier.weight(1f)
                 ) {
@@ -313,11 +417,11 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                 if (isTyping) {
                     item {
                         val whoTalks = when {
-                            agentMode -> "${selectedAI}-agenten jobber på serveren"
+                            agentMode -> "${selectedAI}-agenten jobber i '$projectName'"
                             collaborateMode -> "AI-agentene samarbeider"
                             else -> selectedAI
                         }
-                        Text("$whoTalks skriver...", color = Color.Gray, modifier = Modifier.padding(8.dp))
+                        Text("$whoTalks jobber...", color = Color.Gray, modifier = Modifier.padding(8.dp))
                     }
                 }
             }
@@ -332,7 +436,14 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                     value = inputText,
                     onValueChange = { inputText = it },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text(if (agentMode) "Beskriv prosjektet agenten skal bygge..." else "Spør $selectedAI...") },
+                    placeholder = {
+                        Text(
+                            if (agentMode)
+                                "Be $selectedAI-agenten endre filer/mapper eller kjøre kommandoer i '$projectName'..."
+                            else
+                                "Spør $selectedAI..."
+                        )
+                    },
                     colors = TextFieldDefaults.colors(
                         focusedIndicatorColor = Color.Transparent,
                         unfocusedIndicatorColor = Color.Transparent

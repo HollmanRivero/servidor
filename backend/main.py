@@ -1,8 +1,10 @@
 import ast
 import json
 import os
+import platform
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import threading
@@ -34,6 +36,9 @@ except ModuleNotFoundError as exc:
 
 # Last inn backend/.env (GEMINI_API_KEY, DEEPSEEK_API_KEY, TECH_AI_API_KEY, API_TOKEN m.m.)
 BASE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BASE_DIR.parent.resolve()
+OS_NAME = platform.system()  # "Linux", "Darwin" (macOS) eller "Windows"
+OS_DESCRIPTION = f"{OS_NAME} ({platform.release()})"
 load_dotenv(BASE_DIR / ".env", override=True)
 
 import auth
@@ -305,71 +310,107 @@ else:
     logger.info("Token-beskyttelse aktiv ({} gyldige tokens konfigurert).", len(VALID_TOKENS))
 
 
+def _display_path(target: Path) -> str:
+    try:
+        if target == REPO_ROOT:
+            return "servidor"
+        if REPO_ROOT in target.parents:
+            return f"servidor/{target.relative_to(REPO_ROOT).as_posix()}"
+        if target == PROJECTS_DIR:
+            return ""
+        if PROJECTS_DIR in target.parents:
+            return target.relative_to(PROJECTS_DIR).as_posix()
+    except Exception:
+        pass
+    return target.as_posix()
+
+
 def safe_path(relative: str) -> Path:
-    """Løser opp en klient-oppgitt sti og nekter alt som ligger utenfor PROJECTS_DIR."""
+    """Løser opp en sti på serveren (støtter servidor-prosjektet, projects/, ~ og absolutte stier på Linux/Mac/Windows)."""
     cleaned = (relative or "").strip()
-    candidate = (PROJECTS_DIR / cleaned).resolve()
-    if candidate != PROJECTS_DIR and PROJECTS_DIR not in candidate.parents:
-        logger.warning("Blokkert sti utenfor projects/: {!r}", relative)
-        raise HTTPException(status_code=403, detail="Acceso denegado")
-    return candidate
+    if not cleaned or cleaned == ".":
+        return PROJECTS_DIR
+
+    # Støtt ~ (hjemmemappe på Linux, macOS og Windows)
+    if cleaned == "~" or cleaned.startswith("~/") or cleaned.startswith("~\\"):
+        return Path(os.path.expanduser(cleaned)).resolve()
+
+    # Støtt "servidor" direkte (dette repoet: REPO_ROOT)
+    norm = cleaned.replace("\\", "/").strip("/")
+    if norm == "servidor":
+        return REPO_ROOT
+    if norm.startswith("servidor/"):
+        sub = norm[len("servidor/"):]
+        return (REPO_ROOT / sub).resolve()
+
+    # Støtt absolutte stier på Linux (/...), macOS (/Users/...) og Windows (C:\...)
+    p = Path(cleaned)
+    if p.is_absolute():
+        return p.resolve()
+
+    # Sjekk om det er et søsterprosjekt i MyGits (f.eks. tech-ai-v1.0.0)
+    for parent_candidate in (REPO_ROOT.parent, REPO_ROOT.parent.parent):
+        sibling = (parent_candidate / cleaned).resolve()
+        if sibling.exists() and sibling != REPO_ROOT.parent:
+            return sibling
+
+    return (PROJECTS_DIR / cleaned).resolve()
 
 
 def _resolve_agent_workdir(project_str: str, fallback_project: str = "") -> tuple[Path, str, str | None]:
-    """Sikrer at agenten aldri krasjer hele oppgaven med HTTP 403 dersom modellen
-    foreslår '..' eller en sti utenfor projects/. Returnerer (workdir, rel_project, warning)."""
-    raw = (project_str or "").strip().strip("/")
-    # Fjern eventuelle innledende "projects/" eller "backend/projects/" hvis modellen inkluderer det
+    """Løser opp arbeidsmappen for agenten (støtter 'servidor', absolutte stier, '~' og prosjekter i projects/)."""
+    warn: str | None = None
+    raw = (project_str or "").strip()
+    norm = raw.replace("\\", "/").strip("/")
     for prefix in ("backend/projects/", "projects/", "./"):
-        if raw.startswith(prefix):
-            raw = raw[len(prefix):].strip("/")
+        if norm.startswith(prefix):
+            norm = norm[len(prefix):].strip("/")
 
-    if not raw or raw in {".", ".."} or raw.startswith("../") or "/.." in raw:
-        warn = None
-        if raw in {".."} or raw.startswith("../") or "/.." in raw:
-            warn = (
-                f"Merk: Stien '{project_str}' peker utenfor projects/ og ble automatisk "
-                f"korrigert til '{fallback_project or '.'}' inne i backend/projects/."
-            )
-            logger.warning("Agent foreslo ugyldig project={!r}, korrigerer til {!r}", project_str, fallback_project)
-        raw = fallback_project
+    if not norm:
+        norm = fallback_project
 
     try:
-        workdir = safe_path(raw)
-        rel = workdir.relative_to(PROJECTS_DIR).as_posix() if workdir != PROJECTS_DIR else ""
+        workdir = safe_path(norm if norm else fallback_project)
+        rel = _display_path(workdir)
         return workdir, rel, warn
-    except HTTPException:
-        warn = (
-            f"Merk: Stien '{project_str}' er utenfor backend/projects/ og er ikke tillatt. "
-            f"Bruker '{fallback_project or '.'}' i stedet."
-        )
-        try:
-            workdir = safe_path(fallback_project)
-            rel = workdir.relative_to(PROJECTS_DIR).as_posix() if workdir != PROJECTS_DIR else ""
-        except HTTPException:
-            workdir = PROJECTS_DIR
-            rel = ""
-        return workdir, rel, warn
+    except Exception as exc:
+        warn = f"Merk: Kunne ikke åpne '{project_str}' ({exc}), bruker '{fallback_project or '.'}'."
+        workdir = safe_path(fallback_project)
+        return workdir, _display_path(workdir), warn
+
+
+def _resolve_target_in_workdir(workdir: Path, target_str: str) -> Path:
+    """Løser opp en fil- eller mappesti fra agenten (relativt til workdir, eller absolutt / ~ / servidor)."""
+    cleaned = (target_str or "").strip()
+    if not cleaned or cleaned == ".":
+        return workdir
+    if cleaned == "~" or cleaned.startswith("~/") or cleaned.startswith("~\\"):
+        return Path(os.path.expanduser(cleaned)).resolve()
+    p = Path(cleaned)
+    if p.is_absolute():
+        return p.resolve()
+    norm = cleaned.replace("\\", "/")
+    if norm == "servidor" and workdir != REPO_ROOT:
+        return REPO_ROOT
+    if norm.startswith("servidor/") and workdir != REPO_ROOT:
+        return (REPO_ROOT / norm[len("servidor/"):]).resolve()
+    return (workdir / cleaned).resolve()
 
 
 def _sanitize_agent_command(command: str) -> tuple[str, str | None]:
-    """Forhindrer at kommandoer henger på interaktiv sudo eller passord-prompt."""
+    """Forhindrer at kommandoer henger på interaktiv sudo-passordprompt på Linux/macOS."""
     cmd = command.strip()
     note = None
-    # Hvis agenten prøver å bruke sudo, legg til -n så den aldri henger, eller fjern sudo
-    # på vanlige filkommandoer inne i projects/.
-    if re.search(r"(^|[;&|]\s*)sudo\s+(?!-n\b)", cmd):
+    if os.name != "nt" and re.search(r"(^|[;&|]\s*)sudo\s+(?!-n\b)", cmd):
         cmd = re.sub(r"(^|[;&|]\s*)sudo\s+", r"\1sudo -n ", cmd)
         note = (
-            "Merk: 'sudo' uten passord er ikke tilgjengelig for agenten. "
-            "Bruk lokale verktøy/pakker uten sudo (f.eks. python3 -m venv, pip, npm lokalt)."
+            "Merk: Hvis sudo krever passord, kjør uten sudo eller bruk passordfri sudo."
         )
     return cmd, note
 
 
 def _run_command(command: str, workdir: Path, timeout: int) -> dict:
-    """Kjører en shell-kommando ikke-interaktivt med cwd inne i projects/.
-    Dreper hele prosessgruppen ved timeout, og kapper output."""
+    """Kjører en shell-kommando på tvers av Ubuntu Linux, macOS og Windows."""
     timeout = max(5, min(int(timeout), AGENT_SHELL_TIMEOUT))
     started = time.monotonic()
 
@@ -386,41 +427,55 @@ def _run_command(command: str, workdir: Path, timeout: int) -> dict:
         "PAGER": "cat",
     })
 
-    proc = subprocess.Popen(
-        cmd,
-        shell=True,
-        cwd=str(workdir),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-        start_new_session=True,
-    )
+    popen_kwargs: dict = {
+        "shell": True,
+        "cwd": str(workdir),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "env": env,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)
     timed_out = False
     try:
         out, err = proc.communicate(timeout=timeout)
         code = proc.returncode
     except subprocess.TimeoutExpired:
         timed_out = True
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            proc.kill()
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    timeout=5,
+                )
+            except Exception:
+                proc.kill()
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, AttributeError):
+                proc.kill()
         out, err = proc.communicate()
         code = 124
 
     if sudo_note and code != 0:
         err = f"{(err or '').rstrip()}\n{sudo_note}".strip()
 
-    rel = workdir.relative_to(PROJECTS_DIR).as_posix() if workdir != PROJECTS_DIR else ""
     return {
         "exit_code": code,
         "stdout": (out or "")[:MAX_OUTPUT_CHARS],
         "stderr": (err or "")[:MAX_OUTPUT_CHARS],
         "duration_ms": int((time.monotonic() - started) * 1000),
         "timed_out": timed_out,
-        "cwd": rel,
+        "cwd": _display_path(workdir),
+        "os": OS_NAME,
     }
 
 
@@ -434,7 +489,11 @@ def _require_agent_shell() -> None:
 
 @app.get("/")
 def read_root():
-    return {"message": "Super-Server API v2.0 funcionando correctamente.", "version": "2.0"}
+    return {
+        "message": "Super-Server API v2.0 funcionando correctamente.",
+        "version": "2.0",
+        "os": OS_DESCRIPTION,
+    }
 
 
 @app.get("/health")
@@ -443,9 +502,11 @@ def health():
     return {
         "status": "ok",
         "version": "2.0",
+        "os": OS_DESCRIPTION,
         "listen": f"{HOST}:{PORT}",
         "auth_required": bool(VALID_TOKENS),
         "projects_dir": str(PROJECTS_DIR),
+        "repo_root": str(REPO_ROOT),
         "projects_dir_exists": PROJECTS_DIR.is_dir(),
         "gemini_models": GEMINI_MODELS,
         "gemini_model_last_ok": _gemini_last_good,
@@ -461,18 +522,22 @@ def health():
 @app.get("/stats")
 def get_system_stats():
     memory_info = psutil.virtual_memory()
-    disk_info = psutil.disk_usage("/")
+    disk_root = os.path.abspath(os.sep)
+    disk_info = psutil.disk_usage(disk_root)
 
     temp_c = 0.0
     if hasattr(psutil, "sensors_temperatures"):
-        temps = psutil.sensors_temperatures()
-        if temps:
-            if "coretemp" in temps and temps["coretemp"]:
-                temp_c = temps["coretemp"][0].current
-            else:
-                first_key = list(temps.keys())[0]
-                if temps[first_key]:
-                    temp_c = temps[first_key][0].current
+        try:
+            temps = psutil.sensors_temperatures()
+            if temps:
+                if "coretemp" in temps and temps["coretemp"]:
+                    temp_c = temps["coretemp"][0].current
+                else:
+                    first_key = list(temps.keys())[0]
+                    if temps[first_key]:
+                        temp_c = temps[first_key][0].current
+        except Exception:
+            temp_c = 0.0
 
     return {
         "cpu_percent": psutil.cpu_percent(interval=0.1),
@@ -495,8 +560,21 @@ def list_projects(path: str = ""):
         raise HTTPException(status_code=400, detail="La ruta no es un directorio")
 
     items = []
+    seen_names: set[str] = set()
+
+    # Når man er på rot-nivå (path == ""), vis alltid selve 'servidor'-prosjektet øverst
+    if not path.strip():
+        items.append({
+            "name": "servidor",
+            "is_dir": True,
+            "path": "servidor",
+        })
+        seen_names.add("servidor")
+
     for item in sorted(target_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-        if item.name.startswith(".agent_"):
+        if item.name.startswith(".agent_") or item.name in {".git", "__pycache__", "node_modules"}:
+            continue
+        if not path.strip() and item.name in seen_names:
             continue
         rel_path = item.name if not path else f"{path.rstrip('/')}/{item.name}"
         items.append({
@@ -535,9 +613,9 @@ def read_file(path: str):
     if not target_path.is_file():
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
     try:
-        content = target_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="El archivo no es texto UTF-8")
+        content = target_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        raise HTTPException(status_code=400, detail="El archivo no se pudo leer")
     return {"content": content}
 
 
@@ -567,19 +645,18 @@ class ShellRequest(BaseModel):
 
 @app.post("/shell")
 def run_shell(body: ShellRequest):
-    """Kjører en shell-kommando inne i backend/projects/."""
+    """Kjører en shell-kommando i valgt mappe på serveren (Linux, macOS og Windows)."""
     _require_agent_shell()
     command = body.command.strip()
     if not command:
         raise HTTPException(status_code=400, detail="Tom kommando")
 
-    workdir = safe_path(body.cwd)
+    workdir, where, _warn = _resolve_agent_workdir(body.cwd, fallback_project="")
     workdir.mkdir(parents=True, exist_ok=True)
     if not workdir.is_dir():
         raise HTTPException(status_code=400, detail="cwd er ikke en mappe")
 
-    where = workdir.relative_to(PROJECTS_DIR).as_posix() or "."
-    logger.info("Shell i projects/{}: {}", where, command[:200])
+    logger.info("Shell i {}: {}", where or ".", command[:200])
     return {"command": command, **_run_command(command, workdir, body.timeout)}
 
 
@@ -1149,26 +1226,38 @@ class AgentTaskRequest(BaseModel):
     max_steps: int = 30
 
 
-AGENT_INSTRUCTIONS = """Du er en utholdende, autonom kodeagent på brukerens Ubuntu-server.
+AGENT_INSTRUCTIONS = f"""Du er en utholdende, autonom kode- og serveragent med FULL KONTROLL over serveren ({OS_DESCRIPTION}).
 Du jobber i en løkke og SKAL FULLFØRE hele oppgaven før du setter "done": true.
 ALDRI gi opp midtveis, ALDRI stopp etter bare å ha opprettet en mappe eller én fil, og ALDRI sett "done": true hvis siste kommando feilet!
 
 VIKTIGE REGLER:
-1. Alle stier ("path" og "project") er ALLTID relative til `backend/projects/`. Bruk ALDRI `..` eller stier utenfor prosjektmappen.
-2. Ikke bruk interaktive kommandoer eller `sudo` (bruk `python3 -m venv`, lokale filer og porter > 1024).
-3. Svar KUN med ett gyldig JSON-objekt (ingen markdown-kodeblokk rundt, ingen ekstra tekst).
+1. Du har full tilgang til å opprette, lese, redigere, flytte, kopiere og slette mapper og filer på hele serveren (relativt til valgt prosjektmappe, i 'servidor', i '~', eller via absolutte stier på Linux, macOS og Windows).
+2. Tilpass shell-kommandoer til operativsystemet på serveren ({OS_DESCRIPTION}): bruk Bash/POSIX på Linux og macOS, og CMD/PowerShell-kompatible kommandoer på Windows.
+3. Svar KUN med ett gyldig JSON-objekt per steg (ingen markdown-kodeblokk rundt, ingen ekstra tekst).
 
 JSON-format (velg nøyaktig ett skjema per steg):
-- Skrive eller oppdatere fil:
-  {"thought": "kort forklaring", "action": "write_file", "path": "filnavn.ext", "content": "full filtekst", "done": false}
+- Skrive eller overskrive fil:
+  {{"thought": "kort forklaring", "action": "write_file", "path": "sti/til/fil.ext", "content": "full filtekst", "done": false}}
+- Redigere del av eksisterende fil (søk og erstatt):
+  {{"thought": "kort forklaring", "action": "edit_file", "path": "sti/til/fil.ext", "old_text": "eksisterende tekst", "new_text": "ny tekst", "done": false}}
+- Legge til tekst på slutten av en fil:
+  {{"thought": "kort forklaring", "action": "append_file", "path": "sti/til/fil.ext", "content": "tekst som legges til", "done": false}}
 - Lese eksisterende fil:
-  {"thought": "kort forklaring", "action": "read_file", "path": "filnavn.ext", "done": false}
-- Liste filer i mappe:
-  {"thought": "kort forklaring", "action": "list_files", "path": "", "done": false}
-- Kjøre en shell-kommando (f.eks. opprette venv, installere pakker, kjøre tester, git init/commit):
-  {"thought": "kort forklaring", "action": "run_command", "command": "kommando her", "done": false}
-- Når HELE oppgaven er bygget, verifisert og testet uten feil:
-  {"thought": "alt er testet og verifisert", "action": "finish", "summary": "kort oppsummering på norsk av alt som ble laget og testet", "done": true}
+  {{"thought": "kort forklaring", "action": "read_file", "path": "sti/til/fil.ext", "done": false}}
+- Liste filer og mapper:
+  {{"thought": "kort forklaring", "action": "list_files", "path": "", "done": false}}
+- Opprette ny mappe (mkdir):
+  {{"thought": "kort forklaring", "action": "mkdir", "path": "ny/mappe", "done": false}}
+- Slette fil eller mappe:
+  {{"thought": "kort forklaring", "action": "delete_path", "path": "sti/som/skal/slettes", "done": false}}
+- Flytte eller gi nytt navn til fil/mappe:
+  {{"thought": "kort forklaring", "action": "move_path", "path": "fra/sti", "dest": "til/sti", "done": false}}
+- Kopiere fil eller mappe:
+  {{"thought": "kort forklaring", "action": "copy_path", "path": "fra/sti", "dest": "til/sti", "done": false}}
+- Kjøre en hvilken som helst terminal/shell-kommando på serveren:
+  {{"thought": "kort forklaring", "action": "run_command", "command": "kommando her", "done": false}}
+- Når HELE oppgaven er utført, verifisert og testet uten feil:
+  {{"thought": "alt er testet og verifisert", "action": "finish", "summary": "kort oppsummering på norsk av alt som ble gjort", "done": true}}
 """
 
 
@@ -1309,8 +1398,9 @@ def chat_agent(body: AgentTaskRequest):
 
             prompt = (
                 f"{AGENT_INSTRUCTIONS}\n\n"
-                f"PROSJEKTMAPPE (relativ til backend/projects/): '{rel_project or '.'}'\n"
-                f"FILER I PROSJEKTET NÅ:\n{tree_now}\n\n"
+                f"OPERATIVSYSTEM: {OS_DESCRIPTION}\n"
+                f"AKTIV ARBEIDSMAPPE: '{workdir}' (visningsnavn: '{rel_project or '.'}')\n"
+                f"FILER I ARBEIDSMAPPEN NÅ:\n{tree_now}\n\n"
                 f"BRUKERENS MÅL:\n{goal}\n\n"
                 f"HISTORIKK FRA TIDLIGERE STEG:\n{recent_history}\n\n"
                 f"Dette er steg {step_num} av {max_steps}. "
@@ -1345,6 +1435,8 @@ def chat_agent(body: AgentTaskRequest):
 
             if not action and "command" in action_obj:
                 action = "run_command"
+            elif not action and "old_text" in action_obj and "new_text" in action_obj:
+                action = "edit_file"
             elif not action and "content" in action_obj and "path" in action_obj:
                 action = "write_file"
             elif not action and wants_done:
@@ -1362,11 +1454,24 @@ def chat_agent(body: AgentTaskRequest):
                 "ok": True,
             }
 
-            if action == "finish" or (wants_done and action not in {"write_file", "run_command", "read_file", "list_files"}):
+            all_file_actions = {
+                "write_file",
+                "edit_file",
+                "append_file",
+                "read_file",
+                "list_files",
+                "mkdir",
+                "delete_path",
+                "move_path",
+                "copy_path",
+                "run_command",
+            }
+
+            if action == "finish" or (wants_done and action not in all_file_actions):
                 if last_step_failed and step_num < max_steps - 1:
                     msg = (
-                        "Avvist finish: Forrige steg feilet. Rett opp feilen og verifiser at koden "
-                        "kjører uten feil før du avslutter!"
+                        "Avvist finish: Forrige steg feilet. Rett opp feilen og verifiser at alt "
+                        "fungerer uten feil før du avslutter!"
                     )
                     step_entry["action"] = "continue"
                     step_entry["result"] = msg
@@ -1384,37 +1489,80 @@ def chat_agent(body: AgentTaskRequest):
                 break
 
             elif action == "write_file":
-                rel_file = str(action_obj.get("path") or "").strip().lstrip("/")
+                rel_file = str(action_obj.get("path") or "").strip()
                 content = str(action_obj.get("content") or "")
                 step_entry["target"] = rel_file
                 step_entry["command"] = f"write_file {rel_file}"
-                if not rel_file or ".." in Path(rel_file).parts:
+                if not rel_file:
                     step_entry["ok"] = False
-                    step_entry["result"] = f"Ugyldig filsti '{rel_file}'. Bruk en relativ sti inne i prosjektmappen."
+                    step_entry["result"] = "Filsti ('path') mangler."
                     step_entry["stderr"] = step_entry["result"]
                     last_step_failed = True
                 else:
-                    target_file = (workdir / rel_file).resolve()
-                    if workdir != target_file and workdir not in target_file.parents and PROJECTS_DIR not in target_file.parents:
-                        step_entry["ok"] = False
-                        step_entry["result"] = f"Stien '{rel_file}' peker utenfor prosjektmappen."
-                        step_entry["stderr"] = step_entry["result"]
-                        last_step_failed = True
-                    else:
+                    try:
+                        target_file = _resolve_target_in_workdir(workdir, rel_file)
                         target_file.parent.mkdir(parents=True, exist_ok=True)
                         target_file.write_text(content, encoding="utf-8")
-                        step_entry["result"] = f"Skrev {len(content)} tegn til {rel_file}"
+                        step_entry["result"] = f"Skrev {len(content)} tegn til {target_file}"
                         step_entry["stdout"] = step_entry["result"]
                         last_step_failed = False
+                    except Exception as e:
+                        step_entry["ok"] = False
+                        step_entry["result"] = f"Kunne ikke skrive fil '{rel_file}': {e}"
+                        step_entry["stderr"] = step_entry["result"]
+                        last_step_failed = True
+
+            elif action == "edit_file":
+                rel_file = str(action_obj.get("path") or "").strip()
+                old_text = str(action_obj.get("old_text") or "")
+                new_text = str(action_obj.get("new_text") or "")
+                step_entry["target"] = rel_file
+                step_entry["command"] = f"edit_file {rel_file}"
+                try:
+                    target_file = _resolve_target_in_workdir(workdir, rel_file)
+                    if not target_file.is_file():
+                        raise FileNotFoundError(f"Filen '{rel_file}' finnes ikke")
+                    existing = target_file.read_text(encoding="utf-8", errors="replace")
+                    if old_text and old_text not in existing:
+                        raise ValueError("Fant ikke 'old_text' i filen")
+                    updated = existing.replace(old_text, new_text, 1) if old_text else (existing + "\n" + new_text)
+                    target_file.write_text(updated, encoding="utf-8")
+                    step_entry["result"] = f"Oppdaterte {target_file}"
+                    step_entry["stdout"] = step_entry["result"]
+                    last_step_failed = False
+                except Exception as e:
+                    step_entry["ok"] = False
+                    step_entry["result"] = f"Kunne ikke redigere '{rel_file}': {e}"
+                    step_entry["stderr"] = step_entry["result"]
+                    last_step_failed = True
+
+            elif action == "append_file":
+                rel_file = str(action_obj.get("path") or "").strip()
+                content = str(action_obj.get("content") or "")
+                step_entry["target"] = rel_file
+                step_entry["command"] = f"append_file {rel_file}"
+                try:
+                    target_file = _resolve_target_in_workdir(workdir, rel_file)
+                    target_file.parent.mkdir(parents=True, exist_ok=True)
+                    with target_file.open("a", encoding="utf-8") as f:
+                        f.write(content)
+                    step_entry["result"] = f"La til {len(content)} tegn i {target_file}"
+                    step_entry["stdout"] = step_entry["result"]
+                    last_step_failed = False
+                except Exception as e:
+                    step_entry["ok"] = False
+                    step_entry["result"] = f"Kunne ikke legge til i '{rel_file}': {e}"
+                    step_entry["stderr"] = step_entry["result"]
+                    last_step_failed = True
 
             elif action == "read_file":
-                rel_file = str(action_obj.get("path") or "").strip().lstrip("/")
+                rel_file = str(action_obj.get("path") or "").strip()
                 step_entry["target"] = rel_file
                 step_entry["command"] = f"read_file {rel_file}"
-                target_file = (workdir / rel_file).resolve()
-                if not rel_file or not target_file.is_file() or (workdir not in target_file.parents and target_file != workdir):
+                target_file = _resolve_target_in_workdir(workdir, rel_file)
+                if not rel_file or not target_file.is_file():
                     step_entry["ok"] = False
-                    step_entry["result"] = f"Filen '{rel_file}' finnes ikke."
+                    step_entry["result"] = f"Filen '{rel_file}' finnes ikke ({target_file})."
                     step_entry["stderr"] = step_entry["result"]
                     last_step_failed = True
                 else:
@@ -1424,13 +1572,13 @@ def chat_agent(body: AgentTaskRequest):
                     last_step_failed = False
 
             elif action == "list_files":
-                rel_sub = str(action_obj.get("path") or "").strip().lstrip("/")
+                rel_sub = str(action_obj.get("path") or "").strip()
                 step_entry["target"] = rel_sub or "."
                 step_entry["command"] = f"list_files {rel_sub or '.'}"
-                target_dir = (workdir / rel_sub).resolve()
-                if not target_dir.is_dir() or (workdir != target_dir and workdir not in target_dir.parents):
+                target_dir = _resolve_target_in_workdir(workdir, rel_sub)
+                if not target_dir.is_dir():
                     step_entry["ok"] = False
-                    step_entry["result"] = f"Mappen '{rel_sub}' finnes ikke."
+                    step_entry["result"] = f"Mappen '{rel_sub}' finnes ikke ({target_dir})."
                     step_entry["stderr"] = step_entry["result"]
                     last_step_failed = True
                 else:
@@ -1438,6 +1586,84 @@ def chat_agent(body: AgentTaskRequest):
                     step_entry["result"] = snap
                     step_entry["stdout"] = snap
                     last_step_failed = False
+
+            elif action in {"mkdir", "create_dir"}:
+                rel_sub = str(action_obj.get("path") or "").strip()
+                step_entry["target"] = rel_sub
+                step_entry["command"] = f"mkdir {rel_sub}"
+                try:
+                    target_dir = _resolve_target_in_workdir(workdir, rel_sub)
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    step_entry["result"] = f"Opprettet mappe {target_dir}"
+                    step_entry["stdout"] = step_entry["result"]
+                    last_step_failed = False
+                except Exception as e:
+                    step_entry["ok"] = False
+                    step_entry["result"] = f"Kunne ikke opprette mappe '{rel_sub}': {e}"
+                    step_entry["stderr"] = step_entry["result"]
+                    last_step_failed = True
+
+            elif action in {"delete_path", "rm", "delete_file"}:
+                rel_sub = str(action_obj.get("path") or "").strip()
+                step_entry["target"] = rel_sub
+                step_entry["command"] = f"delete_path {rel_sub}"
+                try:
+                    target_p = _resolve_target_in_workdir(workdir, rel_sub)
+                    if not target_p.exists():
+                        raise FileNotFoundError(f"'{rel_sub}' finnes ikke")
+                    if target_p.is_dir():
+                        shutil.rmtree(target_p)
+                    else:
+                        target_p.unlink()
+                    step_entry["result"] = f"Slettet {target_p}"
+                    step_entry["stdout"] = step_entry["result"]
+                    last_step_failed = False
+                except Exception as e:
+                    step_entry["ok"] = False
+                    step_entry["result"] = f"Kunne ikke slette '{rel_sub}': {e}"
+                    step_entry["stderr"] = step_entry["result"]
+                    last_step_failed = True
+
+            elif action in {"move_path", "mv", "rename"}:
+                src_str = str(action_obj.get("path") or action_obj.get("src") or "").strip()
+                dst_str = str(action_obj.get("dest") or action_obj.get("to") or "").strip()
+                step_entry["target"] = f"{src_str} -> {dst_str}"
+                step_entry["command"] = f"move_path {src_str} -> {dst_str}"
+                try:
+                    src_p = _resolve_target_in_workdir(workdir, src_str)
+                    dst_p = _resolve_target_in_workdir(workdir, dst_str)
+                    dst_p.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(src_p), str(dst_p))
+                    step_entry["result"] = f"Flyttet {src_p} til {dst_p}"
+                    step_entry["stdout"] = step_entry["result"]
+                    last_step_failed = False
+                except Exception as e:
+                    step_entry["ok"] = False
+                    step_entry["result"] = f"Kunne ikke flytte '{src_str}' til '{dst_str}': {e}"
+                    step_entry["stderr"] = step_entry["result"]
+                    last_step_failed = True
+
+            elif action in {"copy_path", "cp"}:
+                src_str = str(action_obj.get("path") or action_obj.get("src") or "").strip()
+                dst_str = str(action_obj.get("dest") or action_obj.get("to") or "").strip()
+                step_entry["target"] = f"{src_str} -> {dst_str}"
+                step_entry["command"] = f"copy_path {src_str} -> {dst_str}"
+                try:
+                    src_p = _resolve_target_in_workdir(workdir, src_str)
+                    dst_p = _resolve_target_in_workdir(workdir, dst_str)
+                    dst_p.parent.mkdir(parents=True, exist_ok=True)
+                    if src_p.is_dir():
+                        shutil.copytree(src_p, dst_p, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(src_p, dst_p)
+                    step_entry["result"] = f"Kopierte {src_p} til {dst_p}"
+                    step_entry["stdout"] = step_entry["result"]
+                    last_step_failed = False
+                except Exception as e:
+                    step_entry["ok"] = False
+                    step_entry["result"] = f"Kunne ikke kopiere '{src_str}' til '{dst_str}': {e}"
+                    step_entry["stderr"] = step_entry["result"]
+                    last_step_failed = True
 
             elif action == "run_command":
                 cmd = str(action_obj.get("command") or "").strip()
@@ -1467,7 +1693,7 @@ def chat_agent(body: AgentTaskRequest):
                 step_entry["ok"] = False
                 step_entry["result"] = (
                     f"Ukjent action '{action}'. Gyldige actions er: "
-                    "write_file, read_file, list_files, run_command, finish."
+                    "write_file, edit_file, append_file, read_file, list_files, mkdir, delete_path, move_path, copy_path, run_command, finish."
                 )
                 last_step_failed = True
 
@@ -1487,7 +1713,7 @@ def chat_agent(body: AgentTaskRequest):
                 })
                 _save_agent_state()
 
-            if wants_done and not last_step_failed and action in {"write_file", "run_command"}:
+            if wants_done and not last_step_failed and action in all_file_actions:
                 done = True
                 summary = str(action_obj.get("summary") or thought or "Oppgaven er fullført.").strip()
                 break
