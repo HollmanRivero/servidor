@@ -21,7 +21,6 @@ import com.pepito.servidor.network.AgentTaskRequest
 import com.pepito.servidor.network.ChatRequest
 import com.pepito.servidor.network.CollaborateRequest
 import com.pepito.servidor.network.RetrofitClient
-import com.pepito.servidor.network.ShellRequest
 import kotlinx.coroutines.launch
 
 data class ChatMessage(val text: String, val isUser: Boolean, val senderName: String = "Du")
@@ -34,14 +33,13 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
     var agentMode by remember { mutableStateOf(true) }
     var projectName by remember { mutableStateOf("servidor") }
     var availableProjects by remember { mutableStateOf(listOf("servidor", "~")) }
-    var shellCommand by remember { mutableStateOf("") }
     var messages by remember {
         mutableStateOf(
             listOf(
                 ChatMessage(
                     "Hei! Agent-modus med full serverkontroll (Linux, macOS og Windows) er klar. " +
-                        "Velg AI (Gemini, DeepSeek eller Tech-AI), velg prosjekt (f.eks. servidor), " +
-                        "og skriv hva agenten skal utføre eller kjør en kommando direkte.",
+                        "Velg AI (Gemini, DeepSeek eller Tech-AI), velg prosjekt øverst, " +
+                        "og skriv hva du vil gjøre i meldingsfeltet nederst.",
                     false,
                     "System"
                 )
@@ -52,53 +50,17 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
     var isTyping by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(Unit) {
+    suspend fun refreshProjects() {
         try {
             val res = RetrofitClient.api.listProjects("")
             val dirs = res.items.filter { it.is_dir }.map { it.path }
-            val merged = (listOf("servidor", "~") + dirs).distinct()
-            availableProjects = merged
+            availableProjects = (listOf("servidor", "~") + dirs).distinct()
         } catch (_: Exception) {
         }
     }
 
-    fun runDirectShellCommand(cmd: String) {
-        val cleanCmd = cmd.trim()
-        if (cleanCmd.isEmpty() || isTyping) return
-        val targetProj = projectName.trim().ifEmpty { "servidor" }
-        messages = messages + ChatMessage("💻 [$targetProj] $ $cleanCmd", true)
-        shellCommand = ""
-        isTyping = true
-        scope.launch {
-            try {
-                val res = RetrofitClient.api.runShell(
-                    ShellRequest(
-                        command = cleanCmd,
-                        cwd = targetProj,
-                        timeout = 180
-                    )
-                )
-                val statusIcon = if (res.exit_code == 0) "✅" else "❌"
-                val outPart = if (res.stdout.isNotBlank()) "\nSTDOUT:\n${res.stdout.trim()}" else ""
-                val errPart = if (res.stderr.isNotBlank()) "\nSTDERR:\n${res.stderr.trim()}" else ""
-                val body = if (outPart.isEmpty() && errPart.isEmpty()) "\n(kommando utført uten output)" else "$outPart$errPart"
-                messages = messages + ChatMessage(
-                    "$statusIcon Kommando i '${res.cwd.ifBlank { targetProj }}' (exit ${res.exit_code}):$body",
-                    false,
-                    "Terminal (${res.os.ifBlank { "Server" }})"
-                )
-            } catch (e: Exception) {
-                val errMsg = "Feil ved kjøring av kommando: ${e.message}"
-                messages = messages + ChatMessage(errMsg, false, "Terminal")
-                RetrofitClient.reportAppError(
-                    message = errMsg,
-                    endpoint = "POST /shell ($targetProj)",
-                    details = e.toString()
-                )
-            } finally {
-                isTyping = false
-            }
-        }
+    LaunchedEffect(Unit) {
+        refreshProjects()
     }
 
     fun sendMessage(text: String) {
@@ -173,6 +135,11 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                                     false,
                                     "${rev.agent} (kontroll)"
                                 )
+                            }
+                            refreshProjects()
+                            if (result.steps.any { it.action == "delete_path" && (it.target == "." || it.target == currentProject) && it.ok }) {
+                                projectName = "servidor"
+                                currentProject = "servidor"
                             }
                             if (result.done) break
                             round++
@@ -349,32 +316,9 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                         onValueChange = { projectName = it },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("Aktiv prosjektmappe / sti på serveren") },
+                        label = { Text("Prosjektmappe (i backend/projects/ eller servidor)") },
                         placeholder = { Text("f.eks. servidor, ~, eller prosjektnavn") }
                     )
-                }
-
-                // Direkte kommandokjøring under Velg prosjekt i Agent-fanen
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextField(
-                        value = shellCommand,
-                        onValueChange = { shellCommand = it },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        placeholder = { Text("💻 Kjør kommando i '$projectName' (git, ls, dir, python...)") }
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = { runDirectShellCommand(shellCommand) },
-                        enabled = !isTyping && shellCommand.isNotBlank()
-                    ) {
-                        Text("Kjør")
-                    }
                 }
             }
 

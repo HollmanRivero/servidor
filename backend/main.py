@@ -312,14 +312,14 @@ else:
 
 def _display_path(target: Path) -> str:
     try:
-        if target == REPO_ROOT:
-            return "servidor"
-        if REPO_ROOT in target.parents:
-            return f"servidor/{target.relative_to(REPO_ROOT).as_posix()}"
         if target == PROJECTS_DIR:
             return ""
         if PROJECTS_DIR in target.parents:
             return target.relative_to(PROJECTS_DIR).as_posix()
+        if target == REPO_ROOT:
+            return "servidor"
+        if REPO_ROOT in target.parents:
+            return f"servidor/{target.relative_to(REPO_ROOT).as_posix()}"
     except Exception:
         pass
     return target.as_posix()
@@ -362,7 +362,7 @@ def _resolve_agent_workdir(project_str: str, fallback_project: str = "") -> tupl
     warn: str | None = None
     raw = (project_str or "").strip()
     norm = raw.replace("\\", "/").strip("/")
-    for prefix in ("backend/projects/", "projects/", "./"):
+    for prefix in ("servidor/backend/projects/", "backend/projects/", "projects/", "./"):
         if norm.startswith(prefix):
             norm = norm[len(prefix):].strip("/")
 
@@ -389,7 +389,12 @@ def _resolve_target_in_workdir(workdir: Path, target_str: str) -> Path:
     p = Path(cleaned)
     if p.is_absolute():
         return p.resolve()
-    norm = cleaned.replace("\\", "/")
+    norm = cleaned.replace("\\", "/").strip("/")
+    if norm == workdir.name and not (workdir / norm).exists():
+        return workdir
+    for prefix in ("servidor/backend/projects/", "backend/projects/", "projects/"):
+        if norm.startswith(prefix):
+            return (PROJECTS_DIR / norm[len(prefix):]).resolve()
     if norm == "servidor" and workdir != REPO_ROOT:
         return REPO_ROOT
     if norm.startswith("servidor/") and workdir != REPO_ROOT:
@@ -427,9 +432,11 @@ def _run_command(command: str, workdir: Path, timeout: int) -> dict:
         "PAGER": "cat",
     })
 
+    actual_cwd = workdir if workdir.exists() else (workdir.parent if workdir.parent.exists() else PROJECTS_DIR)
+
     popen_kwargs: dict = {
         "shell": True,
-        "cwd": str(workdir),
+        "cwd": str(actual_cwd),
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
@@ -1248,7 +1255,7 @@ JSON-format (velg nøyaktig ett skjema per steg):
   {{"thought": "kort forklaring", "action": "list_files", "path": "", "done": false}}
 - Opprette ny mappe (mkdir):
   {{"thought": "kort forklaring", "action": "mkdir", "path": "ny/mappe", "done": false}}
-- Slette fil eller mappe:
+- Slette fil eller mappe (bruk "path": "." hvis selve den valgte prosjektmappen skal slettes):
   {{"thought": "kort forklaring", "action": "delete_path", "path": "sti/som/skal/slettes", "done": false}}
 - Flytte eller gi nytt navn til fil/mappe:
   {{"thought": "kort forklaring", "action": "move_path", "path": "fra/sti", "dest": "til/sti", "done": false}}
@@ -1310,7 +1317,7 @@ def _extract_json_object(raw: str) -> dict | None:
 
 def _project_tree_snapshot(workdir: Path, max_entries: int = 60) -> str:
     if not workdir.exists():
-        return "(mappen finnes ikke ennå)"
+        return "(mappen finnes ikke / er slettet)"
     entries: list[str] = []
     for root, dirs, files in os.walk(workdir):
         dirs[:] = [d for d in dirs if d not in {".git", "node_modules", ".venv", "venv", "__pycache__"}]
@@ -1362,7 +1369,8 @@ def chat_agent(body: AgentTaskRequest):
         raw_project = slug
 
     workdir, rel_project, init_warn = _resolve_agent_workdir(raw_project, fallback_project="prosjekt")
-    workdir.mkdir(parents=True, exist_ok=True)
+    if not any(w in goal.lower() for w in ("slett", "delete", "fjern", "remove")):
+        workdir.mkdir(parents=True, exist_ok=True)
 
     steps_log: list[dict] = []
     history_notes: list[str] = []
