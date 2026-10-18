@@ -150,6 +150,39 @@ data class RegisterResponse(
     val role: String = ""
 )
 
+// --- Automatisk SQL-feillogging (/errors/*) ---
+
+data class ErrorReportRequest(
+    val error_message: String,
+    val source: String = "android_app_v2.0",
+    val endpoint: String = "",
+    val status_code: Int = 0,
+    val details: String = "",
+    val username: String = ""
+)
+
+data class ErrorLogItem(
+    val id: String = "",
+    val username: String? = null,
+    val source: String = "",
+    val endpoint: String = "",
+    val status_code: Int = 0,
+    val error_message: String = "",
+    val details: String = "",
+    val resolved: Int = 0,
+    val created_at: String = ""
+)
+
+data class ErrorLogsResponse(
+    val unresolved_count: Int = 0,
+    val total_returned: Int = 0,
+    val errors: List<ErrorLogItem> = emptyList()
+)
+
+data class ResolveErrorRequest(
+    val error_id: String = "all"
+)
+
 interface ServerApiService {
     @GET("stats")
     suspend fun getStats(): ServerStats
@@ -186,6 +219,15 @@ interface ServerApiService {
 
     @POST("auth/register")
     suspend fun register(@Body request: RegisterRequest): RegisterResponse
+
+    @POST("errors/report")
+    suspend fun reportError(@Body request: ErrorReportRequest)
+
+    @GET("errors")
+    suspend fun getErrors(@Query("only_unresolved") onlyUnresolved: Boolean = false): ErrorLogsResponse
+
+    @POST("errors/resolve")
+    suspend fun resolveErrors(@Body request: ResolveErrorRequest)
 }
 
 object RetrofitClient {
@@ -228,6 +270,8 @@ object RetrofitClient {
             _api = null
         }
 
+    var CURRENT_USER: String = ""
+
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
@@ -259,4 +303,26 @@ object RetrofitClient {
             }
             return _api!!
         }
+
+    suspend fun reportAppError(
+        message: String,
+        endpoint: String = "",
+        statusCode: Int = 0,
+        details: String = ""
+    ) {
+        try {
+            api.reportError(
+                ErrorReportRequest(
+                    error_message = message,
+                    source = "android_app_v2.0",
+                    endpoint = endpoint,
+                    status_code = statusCode,
+                    details = details,
+                    username = CURRENT_USER
+                )
+            )
+        } catch (_: Exception) {
+            // Unngå krasj dersom serveren ikke er nåbar akkurat da
+        }
+    }
 }

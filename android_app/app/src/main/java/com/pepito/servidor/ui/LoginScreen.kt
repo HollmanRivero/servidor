@@ -57,6 +57,7 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                 val name = resp.user?.username ?: username.trim()
                 val role = resp.user?.role ?: "user"
                 RetrofitClient.JWT_TOKEN = token
+                RetrofitClient.CURRENT_USER = name
                 prefs.edit()
                     .putString("auth_token", token)
                     .putString("username", name)
@@ -70,8 +71,18 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                     409 -> "Brukernavnet er allerede i bruk"
                     else -> "Serveren svarte med feil ${e.code()}"
                 }
+                RetrofitClient.reportAppError(
+                    message = error ?: "HTTP ${e.code()}",
+                    endpoint = if (isRegister) "POST /auth/register" else "POST /auth/login",
+                    statusCode = e.code()
+                )
             } catch (e: Exception) {
                 error = "Kunne ikke nå serveren (${e.message}) – sjekk ⚙️ Innstillinger oppe til høyre"
+                RetrofitClient.reportAppError(
+                    message = error ?: "Nettverksfeil",
+                    endpoint = if (isRegister) "POST /auth/register" else "POST /auth/login",
+                    details = e.toString()
+                )
             } finally {
                 isLoading = false
             }
@@ -81,7 +92,7 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Super-Server", fontWeight = FontWeight.Bold, color = LightText) },
+                title = { Text("Super-Server v2.0", fontWeight = FontWeight.Bold, color = LightText) },
                 actions = {
                     IconButton(onClick = {
                         tempIp = RetrofitClient.BASE_URL

@@ -127,8 +127,8 @@ AGENT_SHELL_ENABLED = os.environ.get("ENABLE_AGENT_SHELL", "1").strip().lower() 
 AGENT_SHELL_TIMEOUT = int(os.environ.get("AGENT_SHELL_TIMEOUT", "180"))
 MAX_OUTPUT_CHARS = 12000
 
-# Disse kan nås uten token: helsesjekk + innlogging/registrering.
-OPEN_PATHS = {"/", "/health", "/auth/login", "/auth/register"}
+# Disse kan nås uten token: helsesjekk + innlogging/registrering + feilrapportering fra appen.
+OPEN_PATHS = {"/", "/health", "/auth/login", "/auth/register", "/errors/report"}
 
 # Tailscale auto-connect konfigurasjon (leses fra backend/.env)
 TAILSCALE_AUTH_KEY = os.environ.get("TAILSCALE_AUTH_KEY", "").strip()
@@ -196,7 +196,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Super-Server API", version="1.3.0", lifespan=lifespan)
+app = FastAPI(title="Super-Server API", version="2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -214,13 +214,39 @@ def _is_valid_token(supplied: str) -> bool:
     return False
 
 
+async def _run_and_log_errors(request: Request, call_next, current_user: dict | None, client: str):
+    try:
+        response = await call_next(request)
+        if response.status_code >= 400 and request.url.path not in {"/errors/report"}:
+            auth.log_error(
+                error_message=f"HTTP {response.status_code} på {request.method} {request.url.path}",
+                source="backend",
+                endpoint=f"{request.method} {request.url.path}",
+                status_code=response.status_code,
+                user=current_user,
+                ip_address=client,
+            )
+        return response
+    except Exception as exc:
+        logger.exception("Uventet feil på {} {}: {}", request.method, request.url.path, exc)
+        auth.log_error(
+            error_message=str(exc),
+            source="backend_exception",
+            endpoint=f"{request.method} {request.url.path}",
+            status_code=500,
+            user=current_user,
+            ip_address=client,
+        )
+        raise
+
+
 @app.middleware("http")
 async def check_token(request: Request, call_next):
-    """Adgangskontroll: støtter både JWT fra /auth/login OG X-API-Token."""
-    if request.method == "OPTIONS" or request.url.path in OPEN_PATHS:
-        return await call_next(request)
-
+    """Adgangskontroll + automatisk SQL-logging av aktivitet og feilmeldinger."""
     client = request.client.host if request.client else "?"
+    if request.method == "OPTIONS" or request.url.path in OPEN_PATHS:
+        return await _run_and_log_errors(request, call_next, None, client)
+
     current_user = None
 
     # 1) Sjekk Bearer JWT (fra /auth/login) så vi kan logge hvilken bruker som gjør kallet
@@ -228,31 +254,44 @@ async def check_token(request: Request, call_next):
     if auth_header.lower().startswith("bearer "):
         token = auth_header[7:].strip()
         if _is_valid_token(token):
-            return await call_next(request)
+            return await _run_and_log_errors(request, call_next, None, client)
         state = auth.check_token(token)
         if state.get("ok"):
             current_user = state.get("user")
             if request.url.path not in {"/stats", "/health"}:
                 auth.log_user_activity(request.url.path, current_user, client, allowed=True)
-            return await call_next(request)
-        # Hvis JWT er ugyldig, men gyldig X-API-Token også ble sendt med, tillat kallet
+            return await _run_and_log_errors(request, call_next, current_user, client)
         supplied_api = request.headers.get("x-api-token", "").strip()
         if _is_valid_token(supplied_api):
-            return await call_next(request)
+            return await _run_and_log_errors(request, call_next, None, client)
         status = state.get("status", 401)
         auth.log_user_activity(request.url.path, None, client, allowed=False, blocked_reason=state.get("detail", ""))
+        auth.log_error(
+            error_message=state.get("detail", "Ingen tilgang"),
+            source="auth",
+            endpoint=f"{request.method} {request.url.path}",
+            status_code=status,
+            ip_address=client,
+        )
         return JSONResponse(status_code=status, content={"detail": state.get("detail", "Ingen tilgang")})
 
     # 2) Master-token (X-API-Token)
     supplied = request.headers.get("x-api-token", "").strip()
     if _is_valid_token(supplied):
-        return await call_next(request)
+        return await _run_and_log_errors(request, call_next, None, client)
 
     if not VALID_TOKENS:
-        return await call_next(request)
+        return await _run_and_log_errors(request, call_next, None, client)
 
     logger.warning("Nektet {} {} fra {} (ugyldig token)", request.method, request.url.path, client)
     auth.log_user_activity(request.url.path, None, client, allowed=False, blocked_reason="Manglende token")
+    auth.log_error(
+        error_message="Token inválido o ausente",
+        source="auth",
+        endpoint=f"{request.method} {request.url.path}",
+        status_code=401,
+        ip_address=client,
+    )
     return JSONResponse(status_code=401, content={"detail": "Token inválido o ausente"})
 
 
@@ -395,7 +434,7 @@ def _require_agent_shell() -> None:
 
 @app.get("/")
 def read_root():
-    return {"message": "Super-Server API funcionando correctamente."}
+    return {"message": "Super-Server API v2.0 funcionando correctamente.", "version": "2.0"}
 
 
 @app.get("/health")
@@ -403,6 +442,7 @@ def health():
     """Åpne http://<server-ip>:8000/health i nettleseren for å se status."""
     return {
         "status": "ok",
+        "version": "2.0",
         "listen": f"{HOST}:{PORT}",
         "auth_required": bool(VALID_TOKENS),
         "projects_dir": str(PROJECTS_DIR),
@@ -742,7 +782,7 @@ def _ask_techai(prompt: str, json_mode: bool = False) -> tuple[str, str]:
 
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "Super-Server/1.2",
+        "User-Agent": "Super-Server/2.0",
     }
     if TECH_AI_API_KEY:
         headers["Authorization"] = f"Bearer {TECH_AI_API_KEY}"
@@ -808,6 +848,7 @@ def chat_gemini(body: ChatRequest):
     if not GEMINI_API_KEY and TECH_AI_API_KEY:
         return chat_techai(body)
     if not GEMINI_API_KEY:
+        auth.log_error("GEMINI_API_KEY mangler i backend/.env", source="ai_gemini", endpoint="POST /chat/gemini")
         return {"reply": "Gemini Feil: GEMINI_API_KEY mangler i backend/.env"}
 
     try:
@@ -815,6 +856,7 @@ def chat_gemini(body: ChatRequest):
         return {"reply": text}
     except Exception as e:
         logger.error("Gemini feilet: {}", e)
+        auth.log_error(str(e), source="ai_gemini", endpoint="POST /chat/gemini")
         if DEEPSEEK_API_KEY:
             try:
                 text, _model = _ask_deepseek(user_message)
@@ -844,9 +886,11 @@ def chat_techai(body: ChatRequest):
         if GEMINI_API_KEY:
             text, _model = _ask_gemini(f"{TECH_AI_SYSTEM}\n\nBruker: {user_message}\nTech-AI:")
             return {"reply": text}
+        auth.log_error("TECH_AI_API_KEY mangler i backend/.env", source="ai_techai", endpoint="POST /chat/techai")
         return {"reply": "Tech-AI Feil: Legg inn TECH_AI_API_KEY i backend/.env"}
     except Exception as e:
         logger.error("Tech-AI feilet: {}", e)
+        auth.log_error(_error_detail(e), source="ai_techai", endpoint="POST /chat/techai")
         return {"reply": f"Tech-AI Feil: {_error_detail(e)}"}
 
 
@@ -856,6 +900,7 @@ def chat_deepseek(body: ChatRequest):
     if not user_message:
         return {"reply": "Hei! Jeg er DeepSeek. Hva kan jeg hjelpe deg med?"}
     if not DEEPSEEK_API_KEY:
+        auth.log_error("DEEPSEEK_API_KEY mangler i backend/.env", source="ai_deepseek", endpoint="POST /chat/deepseek")
         return {"reply": "DeepSeek Feil: DEEPSEEK_API_KEY mangler i backend/.env"}
 
     try:
@@ -863,6 +908,7 @@ def chat_deepseek(body: ChatRequest):
         return {"reply": text}
     except Exception as e:
         logger.error("DeepSeek feilet: {}", e)
+        auth.log_error(_error_detail(e), source="ai_deepseek", endpoint="POST /chat/deepseek")
         if GEMINI_API_KEY:
             try:
                 text, _model = _ask_gemini(f"{GEMINI_SYSTEM}\n\nBruker: {user_message}\nGemini:")
@@ -1614,8 +1660,57 @@ def admin_list_users():
     return {"users": auth.list_all_users()}
 
 
+class ErrorReportRequest(BaseModel):
+    error_message: str
+    source: str = "app"
+    endpoint: str = ""
+    status_code: int = 0
+    details: str = ""
+    username: str = ""
+
+
+class ResolveErrorRequest(BaseModel):
+    error_id: str = "all"
+
+
+@app.post("/errors/report")
+def report_error(body: ErrorReportRequest, request: Request):
+    """Mottar feilmeldinger fra mobilappen eller eksterne servere og lagrer dem i lokal SQL."""
+    client_ip = request.client.host if request.client else ""
+    saved = auth.log_error(
+        error_message=body.error_message,
+        source=body.source or "app",
+        endpoint=body.endpoint,
+        status_code=body.status_code,
+        details=body.details,
+        username=body.username,
+        ip_address=client_ip,
+    )
+    return {"ok": True, "error": saved}
+
+
+@app.get("/errors")
+def get_errors(only_unresolved: bool = False, limit: int = 50):
+    """Henter lagrede feilmeldinger fra lokal SQL-database slik at man kan sjekke dem når som helst."""
+    items = auth.list_error_logs(only_unresolved=only_unresolved, limit=limit)
+    unresolved = [i for i in items if not i.get("resolved")]
+    return {
+        "unresolved_count": len(unresolved),
+        "total_returned": len(items),
+        "errors": items,
+    }
+
+
+@app.post("/errors/resolve")
+def resolve_errors(body: ResolveErrorRequest):
+    """Markerer feilmeldinger i SQL som løst etter at de er fikset."""
+    auth.mark_errors_resolved(body.error_id)
+    return {"ok": True}
+
+
 if __name__ == "__main__":
     logger.info("Super-Server lytter på http://{}:{}", HOST, PORT)
     uvicorn.run(app, host=HOST, port=PORT)
+
 
 

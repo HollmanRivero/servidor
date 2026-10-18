@@ -27,7 +27,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.pepito.servidor.network.ErrorLogItem
 import com.pepito.servidor.network.ProjectItem
+import com.pepito.servidor.network.ResolveErrorRequest
 import com.pepito.servidor.network.RetrofitClient
 import com.pepito.servidor.network.ServerStats
 import com.pepito.servidor.ui.theme.*
@@ -48,6 +50,9 @@ fun DashboardScreen(
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var showIpDialog by remember { mutableStateOf(false) }
+    var showErrorsDialog by remember { mutableStateOf(false) }
+    var errorLogs by remember { mutableStateOf<List<ErrorLogItem>>(emptyList()) }
+    var unresolvedCount by remember { mutableStateOf(0) }
     var tempIp by remember { mutableStateOf(RetrofitClient.BASE_URL) }
     var tempToken by remember { mutableStateOf(RetrofitClient.API_TOKEN) }
     
@@ -55,9 +60,21 @@ fun DashboardScreen(
     val prefs = remember { context.getSharedPreferences("server_prefs", Context.MODE_PRIVATE) }
     val scope = rememberCoroutineScope()
 
+    fun loadErrors() {
+        scope.launch {
+            try {
+                val res = RetrofitClient.api.getErrors(onlyUnresolved = false)
+                errorLogs = res.errors
+                unresolvedCount = res.unresolved_count
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     fun loadData() {
         RetrofitClient.BASE_URL = prefs.getString("server_ip", RetrofitClient.BASE_URL) ?: RetrofitClient.BASE_URL
         RetrofitClient.API_TOKEN = prefs.getString("api_token", RetrofitClient.API_TOKEN) ?: RetrofitClient.API_TOKEN
+        RetrofitClient.CURRENT_USER = prefs.getString("username", "") ?: ""
         scope.launch {
             isLoading = true
             errorMessage = null
@@ -65,13 +82,24 @@ fun DashboardScreen(
                 stats = RetrofitClient.api.getStats()
                 val response = RetrofitClient.api.listProjects(currentPath)
                 projects = response.items.sortedBy { !it.is_dir }
+                loadErrors()
             } catch (e: HttpException) {
                 errorMessage = when (e.code()) {
                     401 -> "Feil X-API-Token (401) – trykk på ⚙️ for å sjekke X-API-Token (f.eks. servidor123)"
                     else -> "Serveren svarte med feil ${e.code()}"
                 }
+                RetrofitClient.reportAppError(
+                    message = errorMessage ?: "HTTP ${e.code()}",
+                    endpoint = "Dashboard ($currentPath)",
+                    statusCode = e.code()
+                )
             } catch (e: Exception) {
                 errorMessage = "Kunne ikke koble til (${e.javaClass.simpleName}): ${e.message ?: "sjekk Tailscale IP"}"
+                RetrofitClient.reportAppError(
+                    message = errorMessage ?: "Tilkoblingsfeil",
+                    endpoint = "Dashboard ($currentPath)",
+                    details = e.toString()
+                )
             } finally {
                 isLoading = false
             }
@@ -87,7 +115,7 @@ fun DashboardScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("Super-Server Ubuntu", color = LightText)
+                        Text("Super-Server v2.0", color = LightText)
                         val user = prefs.getString("username", null)
                         val role = prefs.getString("user_role", "user")
                         if (user != null) {
@@ -100,6 +128,14 @@ fun DashboardScreen(
                     containerColor = DarkBackground
                 ),
                 actions = {
+                    TextButton(onClick = {
+                        loadErrors()
+                        showErrorsDialog = true
+                    }) {
+                        val label = if (unresolvedCount > 0) "⚠️ Feil ($unresolvedCount)" else "📋 Logg"
+                        val col = if (unresolvedCount > 0) Color(0xFFFFB74D) else LightText
+                        Text(label, color = col)
+                    }
                     TextButton(onClick = onLogout) {
                         Text("Logg ut", color = Color(0xFFFF5252))
                     }
@@ -242,6 +278,63 @@ fun DashboardScreen(
                         dismissButton = {
                             TextButton(onClick = { showIpDialog = false }) {
                                 Text("Cancelar")
+                            }
+                        }
+                    )
+                }
+
+                if (showErrorsDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showErrorsDialog = false },
+                        title = { Text("SQL Feillogg ($unresolvedCount uløste)") },
+                        text = {
+                            if (errorLogs.isEmpty()) {
+                                Text("Ingen feilmeldinger registrert i SQL-databasen.")
+                            } else {
+                                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                                    items(errorLogs) { err ->
+                                        val statusBadge = if (err.resolved == 1) "✅" else "⚠️"
+                                        Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                                            Text(
+                                                text = "$statusBadge ${err.created_at} · ${err.source}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = NeonBlue
+                                            )
+                                            if (err.endpoint.isNotBlank()) {
+                                                Text(
+                                                    text = "${err.endpoint} (kode ${err.status_code})",
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            }
+                                            Text(
+                                                text = err.error_message,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                            HorizontalDivider(modifier = Modifier.padding(top = 6.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            if (unresolvedCount > 0) {
+                                Button(onClick = {
+                                    scope.launch {
+                                        try {
+                                            RetrofitClient.api.resolveErrors(ResolveErrorRequest("all"))
+                                            loadErrors()
+                                        } catch (_: Exception) {
+                                        }
+                                    }
+                                }) {
+                                    Text("Marker som løst")
+                                }
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showErrorsDialog = false }) {
+                                Text("Lukk")
                             }
                         }
                     )

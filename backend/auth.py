@@ -178,6 +178,65 @@ def log_user_activity(
         logger.debug("Kunne ikke logge brukeraktivitet: {}", e)
 
 
+def log_error(
+    error_message: str,
+    source: str = "backend",
+    endpoint: str = "",
+    status_code: int = 500,
+    details: str = "",
+    user: dict | None = None,
+    username: str = "",
+    ip_address: str = "",
+) -> dict:
+    err_id = uuid.uuid4().hex
+    now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    uid = user.get("id") if user else None
+    uname = (user.get("username") if user else None) or username or None
+    msg = (error_message or "Ukjent feil").strip()[:1000]
+    det = (details or "").strip()[:4000]
+    try:
+        db = _db()
+        db.execute(
+            "INSERT INTO error_logs (id, user_id, username, source, endpoint, status_code, error_message, details, ip_address, resolved, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+            (err_id, uid, uname, source, endpoint, int(status_code or 500), msg, det, ip_address, now_str),
+        )
+    except Exception as e:
+        logger.debug("Kunne ikke lagre feilmelding i SQL: {}", e)
+    return {
+        "id": err_id,
+        "username": uname,
+        "source": source,
+        "endpoint": endpoint,
+        "status_code": status_code,
+        "error_message": msg,
+        "details": det,
+        "created_at": now_str,
+    }
+
+
+def list_error_logs(only_unresolved: bool = False, limit: int = 50) -> list[dict]:
+    db = _db()
+    if only_unresolved:
+        return db.fetchall(
+            "SELECT * FROM error_logs WHERE resolved = 0 ORDER BY created_at DESC LIMIT ?",
+            (int(limit),),
+        )
+    return db.fetchall(
+        "SELECT * FROM error_logs ORDER BY created_at DESC LIMIT ?",
+        (int(limit),),
+    )
+
+
+def mark_errors_resolved(error_id: str = "") -> int:
+    db = _db()
+    if error_id and error_id != "all":
+        db.execute("UPDATE error_logs SET resolved = 1 WHERE id = ?", (error_id,))
+    else:
+        db.execute("UPDATE error_logs SET resolved = 1 WHERE resolved = 0")
+    return 1
+
+
 def create_user(
     username: str,
     password: str,
@@ -191,12 +250,8 @@ def create_user(
     if get_user_by_username(clean_name):
         raise ValueError("Brukernavnet er allerede i bruk")
 
-    # VIKTIG REGEL: Kun den aller første brukeren kan være 'admin'.
-    # Hvis det allerede finnes en admin i databasen, tvinges alle nye brukere til 'user'.
-    if any_admin():
-        final_role = "user"
-    else:
-        final_role = "admin"
+    # Standard rolletildeling ved opprettelse
+    final_role = "user" if any_admin() else "admin"
 
     db = _db()
     uid = uuid.uuid4().hex

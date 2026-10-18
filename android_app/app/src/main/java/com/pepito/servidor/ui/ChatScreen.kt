@@ -167,7 +167,13 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                     }
                 }
             } catch (e: Exception) {
-                messages = messages + ChatMessage("Feil: Kunne ikke nå $selectedAI (${e.message})", false, "System")
+                val errMsg = "Feil: Kunne ikke nå $selectedAI (${e.message})"
+                messages = messages + ChatMessage(errMsg, false, "System")
+                RetrofitClient.reportAppError(
+                    message = errMsg,
+                    endpoint = "Chat ($selectedAI)",
+                    details = e.toString()
+                )
             } finally {
                 isTyping = false
             }
@@ -177,7 +183,7 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Super-Server AI", fontWeight = FontWeight.Bold) },
+                title = { Text("Super-Server AI v2.0", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Tilbake")

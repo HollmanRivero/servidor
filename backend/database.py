@@ -88,11 +88,25 @@ _SCHEMA = [
         ip_address TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""",
+    """CREATE TABLE IF NOT EXISTS error_logs (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        username TEXT,
+        source TEXT DEFAULT 'backend',
+        endpoint TEXT DEFAULT '',
+        status_code INTEGER DEFAULT 500,
+        error_message TEXT NOT NULL,
+        details TEXT DEFAULT '',
+        ip_address TEXT DEFAULT '',
+        resolved BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
     "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id)",
     "CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory(kind)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
     "CREATE INDEX IF NOT EXISTS idx_subs_user_id ON subscriptions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_errors_created ON error_logs(created_at)",
 ]
 
 
