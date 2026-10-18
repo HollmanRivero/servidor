@@ -32,19 +32,19 @@ except ModuleNotFoundError as exc:
         "      cd backend && ../.venv/bin/python main.py\n"
     ) from exc
 
-# Nye moduler: agent med verktøy, minne, database og daglig jobb.
-import agent
-import auth
-import database
-import memory
-import scheduler
-
-# Last inn backend/.env (GEMINI_API_KEY, DEEPSEEK_API_KEY, API_TOKEN m.m.)
+# Last inn backend/.env (GEMINI_API_KEY, DEEPSEEK_API_KEY, TECH_AI_API_KEY, API_TOKEN m.m.)
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env", override=True)
 
+import auth
+import database
+
+database.init_db()
+auth.ensure_initial_admin()
+
 PROJECTS_DIR = (BASE_DIR / "projects").resolve()
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+AGENT_STATE_FILE = BASE_DIR / ".agent_state.json"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
@@ -120,12 +120,45 @@ if ":" in _raw_host:
 HOST = _raw_host.strip() or "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8000"))
 
+# Shell- og agent-tilgang.
+AGENT_SHELL_ENABLED = os.environ.get("ENABLE_AGENT_SHELL", "1").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+AGENT_SHELL_TIMEOUT = int(os.environ.get("AGENT_SHELL_TIMEOUT", "180"))
+MAX_OUTPUT_CHARS = 12000
+
 # Disse kan nås uten token: helsesjekk + innlogging/registrering.
 OPEN_PATHS = {"/", "/health", "/auth/login", "/auth/register"}
 
 # Tailscale auto-connect konfigurasjon (leses fra backend/.env)
 TAILSCALE_AUTH_KEY = os.environ.get("TAILSCALE_AUTH_KEY", "").strip()
 AUTO_CONNECT_TAILSCALE = os.environ.get("AUTO_CONNECT_TAILSCALE", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+# Sanntidsstatus for kjørende agent-oppgave (slik at klienten alltid kan hente status)
+_agent_lock = threading.Lock()
+_agent_state: dict = {
+    "running": False,
+    "goal": "",
+    "project": "",
+    "primary": "",
+    "current_step": 0,
+    "max_steps": 0,
+    "done": False,
+    "summary": "",
+    "steps": [],
+    "started_at": 0.0,
+    "updated_at": 0.0,
+}
+
+
+def _save_agent_state() -> None:
+    try:
+        AGENT_STATE_FILE.write_text(
+            json.dumps(_agent_state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.debug("Kunne ikke lagre agent_state til disk: {}", e)
 
 
 def _connect_tailscale() -> None:
@@ -155,13 +188,15 @@ def _connect_tailscale() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Kjører Tailscale-tilkoblingen asynkront i bakgrunnen ved oppstart for ikke å blokkere serveren."""
+    """Initialiserer database og bakgrunnstjenester ved oppstart."""
+    database.init_db()
+    auth.ensure_initial_admin()
     if AUTO_CONNECT_TAILSCALE:
         threading.Thread(target=_connect_tailscale, daemon=True, name="tailscale-connect").start()
     yield
 
 
-app = FastAPI(title="Super-Server API", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Super-Server API", version="1.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -181,34 +216,43 @@ def _is_valid_token(supplied: str) -> bool:
 
 @app.middleware("http")
 async def check_token(request: Request, call_next):
-    """Adgangskontroll: master-token (X-API-Token) ELLER JWT fra /auth/login."""
+    """Adgangskontroll: støtter både JWT fra /auth/login OG X-API-Token."""
     if request.method == "OPTIONS" or request.url.path in OPEN_PATHS:
         return await call_next(request)
 
     client = request.client.host if request.client else "?"
+    current_user = None
 
-    # 1) Master-token: den delte hemmeligheten appen sender i X-API-Token.
-    supplied = request.headers.get("x-api-token", "").strip()
-    if API_TOKEN and supplied and secrets.compare_digest(supplied.encode("utf-8"), API_TOKEN.encode("utf-8")):
-        return await call_next(request)
-
-    # 2) JWT (Bearer) fra /auth/login - eller master-token sendt som Bearer.
+    # 1) Sjekk Bearer JWT (fra /auth/login) så vi kan logge hvilken bruker som gjør kallet
     auth_header = request.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
         token = auth_header[7:].strip()
-        if API_TOKEN and token and secrets.compare_digest(token.encode("utf-8"), API_TOKEN.encode("utf-8")):
+        if _is_valid_token(token):
             return await call_next(request)
         state = auth.check_token(token)
         if state.get("ok"):
+            current_user = state.get("user")
+            if request.url.path not in {"/stats", "/health"}:
+                auth.log_user_activity(request.url.path, current_user, client, allowed=True)
+            return await call_next(request)
+        # Hvis JWT er ugyldig, men gyldig X-API-Token også ble sendt med, tillat kallet
+        supplied_api = request.headers.get("x-api-token", "").strip()
+        if _is_valid_token(supplied_api):
             return await call_next(request)
         status = state.get("status", 401)
+        auth.log_user_activity(request.url.path, None, client, allowed=False, blocked_reason=state.get("detail", ""))
         return JSONResponse(status_code=status, content={"detail": state.get("detail", "Ingen tilgang")})
 
-    if not API_TOKEN:
-        # Ingen token konfigurert - åpen server (advart ved oppstart).
+    # 2) Master-token (X-API-Token)
+    supplied = request.headers.get("x-api-token", "").strip()
+    if _is_valid_token(supplied):
         return await call_next(request)
 
-    logger.warning("Nektet {} {} fra {} (manglende/ugyldig token)", request.method, request.url.path, client)
+    if not VALID_TOKENS:
+        return await call_next(request)
+
+    logger.warning("Nektet {} {} fra {} (ugyldig token)", request.method, request.url.path, client)
+    auth.log_user_activity(request.url.path, None, client, allowed=False, blocked_reason="Manglende token")
     return JSONResponse(status_code=401, content={"detail": "Token inválido o ausente"})
 
 
@@ -360,13 +404,14 @@ def health():
     return {
         "status": "ok",
         "listen": f"{HOST}:{PORT}",
-        "auth_required": bool(API_TOKEN),
+        "auth_required": bool(VALID_TOKENS),
         "projects_dir": str(PROJECTS_DIR),
         "projects_dir_exists": PROJECTS_DIR.is_dir(),
         "gemini_models": GEMINI_MODELS,
         "gemini_model_last_ok": _gemini_last_good,
         "gemini_key_configured": bool(GEMINI_API_KEY),
         "deepseek_key_configured": bool(DEEPSEEK_API_KEY),
+        "techai_key_configured": bool(TECH_AI_API_KEY),
         "agent_shell_enabled": AGENT_SHELL_ENABLED,
         "tailscale_configured": bool(TAILSCALE_AUTH_KEY),
         "agent_running": _agent_state.get("running", False),
@@ -695,10 +740,14 @@ def _ask_techai(prompt: str, json_mode: bool = False) -> tuple[str, str]:
     if not TECH_AI_API_KEY and not os.environ.get("TECH_AI_API_URL"):
         raise RuntimeError("TECH_AI_API_KEY / TECH_AI_API_URL mangler i backend/.env")
 
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Super-Server/1.2",
+    }
     if TECH_AI_API_KEY:
         headers["Authorization"] = f"Bearer {TECH_AI_API_KEY}"
         headers["X-API-Key"] = TECH_AI_API_KEY
+        headers["x-api-key"] = TECH_AI_API_KEY
 
     sys_msg = (
         "Du er Tech-AI kodeagent på en Ubuntu-server. Svar kun med gyldig JSON."
@@ -719,15 +768,34 @@ def _ask_techai(prompt: str, json_mode: bool = False) -> tuple[str, str]:
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
-    result = _post_json(TECH_AI_API_URL, payload, headers, timeout=45)
-    if "choices" in result and result["choices"]:
-        msg = result["choices"][0].get("message") or {}
-        text = msg.get("content") or result["choices"][0].get("text") or ""
-        return str(text), TECH_AI_MODEL
-    for key in ("reply", "response", "text", "answer", "content"):
-        if key in result and isinstance(result[key], str):
-            return result[key], TECH_AI_MODEL
-    raise RuntimeError(f"Uventet svar fra Tech-AI: {str(result)[:200]}")
+    candidate_urls = [
+        TECH_AI_API_URL,
+        "https://tech-ai.tech/api/chat",
+        "https://tech-ai.tech/v1/chat/completions",
+        "https://api.tech-ai.tech/v1/chat/completions",
+    ]
+    seen_urls: list[str] = []
+    for u in candidate_urls:
+        if u and u not in seen_urls:
+            seen_urls.append(u)
+
+    last_err: Exception | None = None
+    for url in seen_urls:
+        try:
+            result = _post_json(url, payload, headers, timeout=30)
+            if "choices" in result and result["choices"]:
+                msg = result["choices"][0].get("message") or {}
+                text = msg.get("content") or result["choices"][0].get("text") or ""
+                if text:
+                    return str(text), TECH_AI_MODEL
+            for key in ("reply", "response", "text", "answer", "content", "output"):
+                if key in result and isinstance(result[key], str) and result[key].strip():
+                    return result[key].strip(), TECH_AI_MODEL
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise RuntimeError(f"Tech-AI endepunkt svarte ikke ({_error_detail(last_err) if last_err else 'ukjent feil'})")
 
 
 @app.post("/chat/gemini")
@@ -762,15 +830,19 @@ def chat_techai(body: ChatRequest):
     if not user_message:
         return {"reply": "Hei! Jeg er Tech-AI. Hva skal vi bygge i dag?"}
 
-    try:
-        if TECH_AI_API_KEY or os.environ.get("TECH_AI_API_URL"):
+    if TECH_AI_API_KEY or os.environ.get("TECH_AI_API_URL"):
+        try:
             text, _model = _ask_techai(user_message)
+            return {"reply": text}
+        except Exception as e:
+            logger.warning("Tech-AI direkte kall feilet ({}), bruker fallback-motor...", _error_detail(e))
+
+    try:
+        if DEEPSEEK_API_KEY:
+            text, _model = _ask_deepseek(f"{TECH_AI_SYSTEM}\n\nBruker: {user_message}")
             return {"reply": text}
         if GEMINI_API_KEY:
             text, _model = _ask_gemini(f"{TECH_AI_SYSTEM}\n\nBruker: {user_message}\nTech-AI:")
-            return {"reply": text}
-        if DEEPSEEK_API_KEY:
-            text, _model = _ask_deepseek(f"{TECH_AI_SYSTEM}\n\nBruker: {user_message}")
             return {"reply": text}
         return {"reply": "Tech-AI Feil: Legg inn TECH_AI_API_KEY i backend/.env"}
     except Exception as e:
@@ -1018,7 +1090,445 @@ def chat_collaborate(body: CollaborateRequest):
 
 
 # ---------------------------------------------------------------------------
-# Autentisering (Fase 1: bcrypt + JWT)
+# Autonom kode-agent: skriver filer, kjører kommandoer og gir ALDRI opp før ferdig
+# ---------------------------------------------------------------------------
+
+
+class AgentTaskRequest(BaseModel):
+    goal: str = ""
+    project: str = ""
+    primary: str = ""
+    agent: str = ""
+    review_with_other: bool = True
+    max_steps: int = 30
+
+
+AGENT_INSTRUCTIONS = """Du er en utholdende, autonom kodeagent på brukerens Ubuntu-server.
+Du jobber i en løkke og SKAL FULLFØRE hele oppgaven før du setter "done": true.
+ALDRI gi opp midtveis, ALDRI stopp etter bare å ha opprettet en mappe eller én fil, og ALDRI sett "done": true hvis siste kommando feilet!
+
+VIKTIGE REGLER:
+1. Alle stier ("path" og "project") er ALLTID relative til `backend/projects/`. Bruk ALDRI `..` eller stier utenfor prosjektmappen.
+2. Ikke bruk interaktive kommandoer eller `sudo` (bruk `python3 -m venv`, lokale filer og porter > 1024).
+3. Svar KUN med ett gyldig JSON-objekt (ingen markdown-kodeblokk rundt, ingen ekstra tekst).
+
+JSON-format (velg nøyaktig ett skjema per steg):
+- Skrive eller oppdatere fil:
+  {"thought": "kort forklaring", "action": "write_file", "path": "filnavn.ext", "content": "full filtekst", "done": false}
+- Lese eksisterende fil:
+  {"thought": "kort forklaring", "action": "read_file", "path": "filnavn.ext", "done": false}
+- Liste filer i mappe:
+  {"thought": "kort forklaring", "action": "list_files", "path": "", "done": false}
+- Kjøre en shell-kommando (f.eks. opprette venv, installere pakker, kjøre tester, git init/commit):
+  {"thought": "kort forklaring", "action": "run_command", "command": "kommando her", "done": false}
+- Når HELE oppgaven er bygget, verifisert og testet uten feil:
+  {"thought": "alt er testet og verifisert", "action": "finish", "summary": "kort oppsummering på norsk av alt som ble laget og testet", "done": true}
+"""
+
+
+def _extract_json_object(raw: str) -> dict | None:
+    """Robust JSON-uttrekk som tåler markdown-blokker, ekstra tekst og enkle feil."""
+    if not raw:
+        return None
+    cleaned = raw.strip()
+
+    if "```" in cleaned:
+        fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, flags=re.DOTALL)
+        for block in fenced:
+            try:
+                obj = json.loads(block)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+
+    try:
+        obj = json.loads(cleaned)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end > start:
+        candidate = cleaned[start : end + 1]
+        for attempt_str in (
+            candidate,
+            re.sub(r",\s*([}\]])", r"\1", candidate),
+        ):
+            try:
+                obj = json.loads(attempt_str)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+        try:
+            obj = ast.literal_eval(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+
+    return None
+
+
+def _project_tree_snapshot(workdir: Path, max_entries: int = 60) -> str:
+    if not workdir.exists():
+        return "(mappen finnes ikke ennå)"
+    entries: list[str] = []
+    for root, dirs, files in os.walk(workdir):
+        dirs[:] = [d for d in dirs if d not in {".git", "node_modules", ".venv", "venv", "__pycache__"}]
+        rel_root = Path(root).relative_to(workdir).as_posix()
+        prefix = "" if rel_root == "." else f"{rel_root}/"
+        for d in sorted(dirs):
+            entries.append(f"{prefix}{d}/")
+        for f in sorted(files):
+            if f.startswith(".agent_"):
+                continue
+            entries.append(f"{prefix}{f}")
+        if len(entries) >= max_entries:
+            break
+    if not entries:
+        return "(tom prosjektmappe)"
+    return "\n".join(entries[:max_entries])
+
+
+@app.get("/chat/agent/status")
+def chat_agent_status():
+    """Returnerer sanntidsstatus for pågående eller siste agent-kjøring."""
+    if not _agent_state.get("steps") and AGENT_STATE_FILE.is_file():
+        try:
+            return json.loads(AGENT_STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return _agent_state
+
+
+@app.post("/chat/agent")
+def chat_agent(body: AgentTaskRequest):
+    """Autonom kodeagent som jobber steg-for-steg helt til oppgaven er ferdigstilt."""
+    _require_agent_shell()
+    goal = body.goal.strip()
+    if not goal:
+        raise HTTPException(status_code=400, detail="Mål (goal) mangler")
+
+    chosen_agent = body.primary or body.agent or "gemini"
+    primary_key = _normalize_agent(chosen_agent)
+    reviewer_key = "deepseek" if primary_key == "gemini" else "gemini"
+    author = _agent_label(primary_key)
+    reviewer = _agent_label(reviewer_key)
+
+    max_steps = max(5, min(int(body.max_steps or 30), 60))
+
+    raw_project = body.project.strip().strip("/")
+    if not raw_project:
+        slug = re.sub(r"[^a-z0-9_-]+", "-", goal.lower())[:32].strip("-") or "prosjekt"
+        raw_project = slug
+
+    workdir, rel_project, init_warn = _resolve_agent_workdir(raw_project, fallback_project="prosjekt")
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    steps_log: list[dict] = []
+    history_notes: list[str] = []
+    if init_warn:
+        history_notes.append(init_warn)
+
+    with _agent_lock:
+        _agent_state.update({
+            "running": True,
+            "goal": goal,
+            "project": rel_project,
+            "primary": author,
+            "current_step": 0,
+            "max_steps": max_steps,
+            "done": False,
+            "summary": "Agenten jobber...",
+            "steps": steps_log,
+            "started_at": time.time(),
+            "updated_at": time.time(),
+        })
+        _save_agent_state()
+
+    done = False
+    summary = ""
+    last_model: str | None = None
+    last_step_failed = False
+    consecutive_parse_errors = 0
+
+    try:
+        for step_num in range(1, max_steps + 1):
+            tree_now = _project_tree_snapshot(workdir)
+            recent_history = "\n\n".join(history_notes[-10:]) if history_notes else "(ingen steg utført ennå)"
+
+            prompt = (
+                f"{AGENT_INSTRUCTIONS}\n\n"
+                f"PROSJEKTMAPPE (relativ til backend/projects/): '{rel_project or '.'}'\n"
+                f"FILER I PROSJEKTET NÅ:\n{tree_now}\n\n"
+                f"BRUKERENS MÅL:\n{goal}\n\n"
+                f"HISTORIKK FRA TIDLIGERE STEG:\n{recent_history}\n\n"
+                f"Dette er steg {step_num} av {max_steps}. "
+                "Velg neste handling som bringer oppgaven i mål, og svar KUN med gyldig JSON:"
+            )
+
+            try:
+                raw_reply, last_model = _ask_agent(primary_key, prompt, json_mode=True)
+            except Exception as e:
+                logger.error("Agent-kall feilet i steg {}: {}", step_num, e)
+                err_txt = f"AI-kall feilet midlertidig ({e}) - prøver igjen i neste steg."
+                history_notes.append(f"Steg {step_num}: {err_txt}")
+                time.sleep(1.5)
+                continue
+
+            action_obj = _extract_json_object(raw_reply)
+            if not action_obj:
+                consecutive_parse_errors += 1
+                logger.warning("Ugyldig JSON fra {} i steg {}: {!r}", author, step_num, raw_reply[:200])
+                history_notes.append(
+                    f"Steg {step_num}: Ditt forrige svar var ikke gyldig JSON. "
+                    "Du MÅ svare med KUN ett JSON-objekt med feltene thought, action og done."
+                )
+                if consecutive_parse_errors >= 4:
+                    primary_key = reviewer_key
+                continue
+
+            consecutive_parse_errors = 0
+            thought = str(action_obj.get("thought") or "").strip()
+            action = str(action_obj.get("action") or "").strip().lower()
+            wants_done = bool(action_obj.get("done"))
+
+            if not action and "command" in action_obj:
+                action = "run_command"
+            elif not action and "content" in action_obj and "path" in action_obj:
+                action = "write_file"
+            elif not action and wants_done:
+                action = "finish"
+
+            step_entry: dict = {
+                "step": step_num,
+                "action": action or "thinking",
+                "thought": thought,
+                "target": "",
+                "command": "",
+                "result": "",
+                "stdout": "",
+                "stderr": "",
+                "ok": True,
+            }
+
+            if action == "finish" or (wants_done and action not in {"write_file", "run_command", "read_file", "list_files"}):
+                if last_step_failed and step_num < max_steps - 1:
+                    msg = (
+                        "Avvist finish: Forrige steg feilet. Rett opp feilen og verifiser at koden "
+                        "kjører uten feil før du avslutter!"
+                    )
+                    step_entry["action"] = "continue"
+                    step_entry["result"] = msg
+                    step_entry["ok"] = False
+                    steps_log.append(step_entry)
+                    history_notes.append(f"Steg {step_num}: {msg}")
+                    last_step_failed = False
+                    continue
+
+                done = True
+                summary = str(action_obj.get("summary") or thought or "Oppgaven er fullført.").strip()
+                step_entry["action"] = "finish"
+                step_entry["result"] = summary
+                steps_log.append(step_entry)
+                break
+
+            elif action == "write_file":
+                rel_file = str(action_obj.get("path") or "").strip().lstrip("/")
+                content = str(action_obj.get("content") or "")
+                step_entry["target"] = rel_file
+                step_entry["command"] = f"write_file {rel_file}"
+                if not rel_file or ".." in Path(rel_file).parts:
+                    step_entry["ok"] = False
+                    step_entry["result"] = f"Ugyldig filsti '{rel_file}'. Bruk en relativ sti inne i prosjektmappen."
+                    step_entry["stderr"] = step_entry["result"]
+                    last_step_failed = True
+                else:
+                    target_file = (workdir / rel_file).resolve()
+                    if workdir != target_file and workdir not in target_file.parents and PROJECTS_DIR not in target_file.parents:
+                        step_entry["ok"] = False
+                        step_entry["result"] = f"Stien '{rel_file}' peker utenfor prosjektmappen."
+                        step_entry["stderr"] = step_entry["result"]
+                        last_step_failed = True
+                    else:
+                        target_file.parent.mkdir(parents=True, exist_ok=True)
+                        target_file.write_text(content, encoding="utf-8")
+                        step_entry["result"] = f"Skrev {len(content)} tegn til {rel_file}"
+                        step_entry["stdout"] = step_entry["result"]
+                        last_step_failed = False
+
+            elif action == "read_file":
+                rel_file = str(action_obj.get("path") or "").strip().lstrip("/")
+                step_entry["target"] = rel_file
+                step_entry["command"] = f"read_file {rel_file}"
+                target_file = (workdir / rel_file).resolve()
+                if not rel_file or not target_file.is_file() or (workdir not in target_file.parents and target_file != workdir):
+                    step_entry["ok"] = False
+                    step_entry["result"] = f"Filen '{rel_file}' finnes ikke."
+                    step_entry["stderr"] = step_entry["result"]
+                    last_step_failed = True
+                else:
+                    txt = target_file.read_text(encoding="utf-8", errors="replace")[:MAX_OUTPUT_CHARS]
+                    step_entry["result"] = txt
+                    step_entry["stdout"] = txt
+                    last_step_failed = False
+
+            elif action == "list_files":
+                rel_sub = str(action_obj.get("path") or "").strip().lstrip("/")
+                step_entry["target"] = rel_sub or "."
+                step_entry["command"] = f"list_files {rel_sub or '.'}"
+                target_dir = (workdir / rel_sub).resolve()
+                if not target_dir.is_dir() or (workdir != target_dir and workdir not in target_dir.parents):
+                    step_entry["ok"] = False
+                    step_entry["result"] = f"Mappen '{rel_sub}' finnes ikke."
+                    step_entry["stderr"] = step_entry["result"]
+                    last_step_failed = True
+                else:
+                    snap = _project_tree_snapshot(target_dir)
+                    step_entry["result"] = snap
+                    step_entry["stdout"] = snap
+                    last_step_failed = False
+
+            elif action == "run_command":
+                cmd = str(action_obj.get("command") or "").strip()
+                step_entry["target"] = cmd
+                step_entry["command"] = cmd
+                if not cmd:
+                    step_entry["ok"] = False
+                    step_entry["result"] = "Tom kommando."
+                    step_entry["stderr"] = "Tom kommando."
+                    last_step_failed = True
+                else:
+                    cmd_res = _run_command(cmd, workdir, AGENT_SHELL_TIMEOUT)
+                    code = cmd_res["exit_code"]
+                    out = cmd_res["stdout"].strip()
+                    err = cmd_res["stderr"].strip()
+                    combined = f"exit_code={code}"
+                    if out:
+                        combined += f"\nSTDOUT:\n{out}"
+                    if err:
+                        combined += f"\nSTDERR:\n{err}"
+                    step_entry["result"] = combined
+                    step_entry["stdout"] = out
+                    step_entry["stderr"] = err
+                    step_entry["ok"] = code == 0
+                    last_step_failed = code != 0
+            else:
+                step_entry["ok"] = False
+                step_entry["result"] = (
+                    f"Ukjent action '{action}'. Gyldige actions er: "
+                    "write_file, read_file, list_files, run_command, finish."
+                )
+                last_step_failed = True
+
+            steps_log.append(step_entry)
+            history_notes.append(
+                f"Steg {step_num} ({step_entry['action']} {step_entry['target']}): "
+                f"{'OK' if step_entry['ok'] else 'FEIL'}\n"
+                f"Tanke: {thought}\n"
+                f"Resultat: {step_entry['result'][:1500]}"
+            )
+
+            with _agent_lock:
+                _agent_state.update({
+                    "current_step": step_num,
+                    "steps": steps_log,
+                    "updated_at": time.time(),
+                })
+                _save_agent_state()
+
+            if wants_done and not last_step_failed and action in {"write_file", "run_command"}:
+                done = True
+                summary = str(action_obj.get("summary") or thought or "Oppgaven er fullført.").strip()
+                break
+
+        if not summary:
+            if done:
+                summary = "Oppgaven er fullført."
+            else:
+                summary = (
+                    f"Agenten kjørte {len(steps_log)} steg i '{rel_project}'. "
+                    "Trykk fortsett eller kjør på nytt for å bygge videre på samme prosjekt."
+                )
+
+        review_obj = None
+        if body.review_with_other and steps_log:
+            try:
+                tree_after = _project_tree_snapshot(workdir)
+                steps_brief = "\n".join(
+                    f"- Steg {s['step']} ({s['action']} {s['target']}): {'OK' if s['ok'] else 'FEIL'}"
+                    for s in steps_log[-12:]
+                )
+                rev_prompt = (
+                    f"Du er {reviewer}. {author} har kjørt en autonom kodeagent i prosjektet '{rel_project}'.\n"
+                    f"Mål: {goal}\n"
+                    f"Filer i prosjektet nå:\n{tree_after}\n\n"
+                    f"Utførte steg:\n{steps_brief}\n\n"
+                    f"Oppsummering fra {author}: {summary}\n\n"
+                    "Svar kort på norsk:\n"
+                    "Linje 1: 'VURDERING: OK' hvis oppgaven ser løst ut, eller 'VURDERING: FEIL' hvis noe viktig mangler.\n"
+                    "Linje 2+: Kort tilbakemelding (1-3 setninger)."
+                )
+                rev_reply, rev_model = _ask_agent(reviewer_key, rev_prompt)
+                review_obj = {
+                    "agent": reviewer,
+                    "model": rev_model,
+                    "verdict": _parse_verdict(rev_reply),
+                    "reply": rev_reply,
+                }
+            except Exception as e:
+                logger.warning("Kontroll-agent feilet: {}", e)
+
+        with _agent_lock:
+            _agent_state.update({
+                "running": False,
+                "done": done,
+                "summary": summary,
+                "steps": steps_log,
+                "updated_at": time.time(),
+            })
+            _save_agent_state()
+
+        return {
+            "goal": goal,
+            "project": rel_project,
+            "primary": author,
+            "model": last_model,
+            "done": done,
+            "summary": summary,
+            "answer": summary,
+            "steps": steps_log,
+            "review": review_obj,
+        }
+    except Exception as exc:
+        logger.exception("Uventet feil i chat_agent: {}", exc)
+        with _agent_lock:
+            _agent_state.update({
+                "running": False,
+                "done": False,
+                "summary": f"Avbrutt av feil: {exc}",
+                "updated_at": time.time(),
+            })
+            _save_agent_state()
+        return {
+            "goal": goal,
+            "project": rel_project,
+            "primary": author,
+            "model": last_model,
+            "done": False,
+            "summary": f"Agenten møtte en feil underveis ({exc}), men har lagret {len(steps_log)} steg.",
+            "answer": f"Agenten møtte en feil underveis ({exc}), men har lagret {len(steps_log)} steg.",
+            "steps": steps_log,
+            "review": None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Lokal SQL Bruker-autentisering og brukeroversikt (/auth/* og /admin/*)
 # ---------------------------------------------------------------------------
 
 
@@ -1034,28 +1544,33 @@ class LoginRequest(BaseModel):
 
 
 @app.post("/auth/register")
-def auth_register(body: RegisterRequest):
-    """Registrerer en bruker. Den aller første brukeren blir automatisk admin."""
+def auth_register(body: RegisterRequest, request: Request):
+    """Registrerer en ny bruker i databasen."""
     username = body.username.strip()
-    if not username or len(body.password) < 6:
-        raise HTTPException(status_code=400, detail="Brukernavn påkrevd og passord minst 6 tegn.")
+    if not username or len(body.password) < 4:
+        raise HTTPException(status_code=400, detail="Brukernavn påkrevd og passord minst 4 tegn.")
     try:
-        role = "admin" if not auth.any_admin() else "user"
-        user = auth.create_user(username, body.password, body.email, role=role)
+        user = auth.create_user(username, body.password, body.email)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    client_ip = request.client.host if request.client else ""
+    auth.log_user_activity("/auth/register", user, client_ip, allowed=True)
     return {"id": user["id"], "username": user["username"], "role": user["role"]}
 
 
 @app.post("/auth/login")
-def auth_login(body: LoginRequest):
-    """Logger inn og returnerer et JWT som brukes i Authorization: Bearer <token>."""
-    user = auth.login(body.username.strip(), body.password)
+def auth_login(body: LoginRequest, request: Request):
+    """Logger inn bruker mot lokal SQL-database og returnerer JWT-token."""
+    client_ip = request.client.host if request.client else ""
+    user = auth.login(body.username.strip(), body.password, ip_address=client_ip)
     if not user:
+        auth.log_user_activity("/auth/login", None, client_ip, allowed=False, blocked_reason=f"Feil innlogging for {body.username}")
         raise HTTPException(status_code=401, detail="Feil brukernavn eller passord.")
     if bool(user.get("is_banned")):
+        auth.log_user_activity("/auth/login", user, client_ip, allowed=False, blocked_reason="Bannet")
         raise HTTPException(status_code=403, detail=f"Bannet: {user.get('ban_reason') or 'ingen grunn'}")
     state, reason = auth.access_state(user)
+    auth.log_user_activity("/auth/login", user, client_ip, allowed=True)
     return {
         "token": auth.create_token(user),
         "user": {
@@ -1071,7 +1586,7 @@ def auth_login(body: LoginRequest):
 
 @app.get("/auth/me")
 def auth_me(request: Request):
-    """Returnerer informasjon om den innloggede brukeren (krever Bearer JWT)."""
+    """Returnerer informasjon om den innloggede brukeren."""
     auth_header = request.headers.get("authorization", "")
     if not auth_header.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Ingen token.")
@@ -1093,59 +1608,14 @@ def auth_me(request: Request):
     }
 
 
-# ---------------------------------------------------------------------------
-# Agent med verktøy + minne + jobber
-#
-# Dette er laget som gir AI-en faktiske evner: kjøre kommandoer, lese/skrive
-# filer, huske ting og holde oversikt over jobber. Appen bruker /agent i
-# stedet for de rene /chat/*-endepunktene når den skal "gjøre" noe.
-# ---------------------------------------------------------------------------
-
-
-class AgentRequest(BaseModel):
-    message: str = ""
-    provider: str = "gemini"       # "gemini" eller "deepseek"
-    conversation_id: str | None = None
-
-
-@app.post("/agent")
-def agent_chat(body: AgentRequest):
-    """Agent-loopen: AI-en velger verktøy, utfører dem og svarer med hva den gjorde."""
-    if not body.message.strip():
-        return {
-            "conversation_id": body.conversation_id,
-            "reply": "Hei! Hva vil du at jeg skal gjøre på serveren?",
-            "model": None,
-            "provider": body.provider,
-            "tool_calls": [],
-        }
-    return agent.run(body.provider, body.message, body.conversation_id)
-
-
-@app.get("/tasks")
-def tasks_list():
-    """Alle jobbene agenten har opprettet, nyeste først."""
-    return {"items": memory.list_tasks()}
-
-
-@app.get("/memory")
-def memory_list(query: str = ""):
-    """Fakta og notater agenten har lagret. Bruk ?query= for å søke."""
-    return {"items": memory.recall(query or None)}
-
-
-@app.post("/run_daily")
-def run_daily_now():
-    """Kjører den daglige vedlikeholdsjobben med en gang (for testing)."""
-    return scheduler.run_daily_job()
-
-
-@app.on_event("startup")
-def _on_startup():
-    database.init_db()
-    scheduler.start_scheduler()
+@app.get("/admin/users")
+def admin_list_users():
+    """Returnerer alle registrerte brukere og innsamlet informasjon fra lokal SQL-database."""
+    return {"users": auth.list_all_users()}
 
 
 if __name__ == "__main__":
     logger.info("Super-Server lytter på http://{}:{}", HOST, PORT)
     uvicorn.run(app, host=HOST, port=PORT)
+
+

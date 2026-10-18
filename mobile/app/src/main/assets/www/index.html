@@ -356,6 +356,7 @@
           <div>📡 Tailscale: <b id="tailscaleStatus" style="color:var(--accent);">Aktiv</b></div>
           <div>✨ Gemini API: <b id="geminiStatus">--</b></div>
           <div>🧠 DeepSeek API: <b id="deepseekStatus">--</b></div>
+          <div>🤖 Tech-AI API: <b id="techaiStatus">--</b></div>
           <div>💻 Shell-tilgang: <b id="shellStatus">--</b></div>
         </div>
       </div>
@@ -367,6 +368,7 @@
         <div class="chat-selector">
           <div class="agent-chip active" onclick="setAgent('gemini', this)">Gemini</div>
           <div class="agent-chip" onclick="setAgent('deepseek', this)">DeepSeek</div>
+          <div class="agent-chip" onclick="setAgent('techai', this)">Tech-AI</div>
           <div class="agent-chip" onclick="setAgent('collaborate', this)">Samarbeid</div>
         </div>
         <div class="chat-messages" id="chatMessages">
@@ -444,7 +446,7 @@
 
   <script>
     let serverUrl = localStorage.getItem("serverUrl") || "http://100.115.248.101:8000";
-    let apiToken = localStorage.getItem("apiToken") || "";
+    let apiToken = localStorage.getItem("apiToken") || "servidor123";
     let currentAgent = "gemini";
     let statsInterval = null;
 
@@ -496,6 +498,10 @@
           document.getElementById("geminiStatus").style.color = data.gemini_key_configured ? "var(--accent)" : "var(--accent-warn)";
           document.getElementById("deepseekStatus").textContent = data.deepseek_key_configured ? "Aktiv" : "Mangler nøkkel";
           document.getElementById("deepseekStatus").style.color = data.deepseek_key_configured ? "var(--accent)" : "var(--accent-warn)";
+          if (document.getElementById("techaiStatus")) {
+            document.getElementById("techaiStatus").textContent = data.techai_key_configured ? "Aktiv" : "Mangler nøkkel";
+            document.getElementById("techaiStatus").style.color = data.techai_key_configured ? "var(--accent)" : "var(--accent-warn)";
+          }
           document.getElementById("shellStatus").textContent = data.agent_shell_enabled ? "Aktiv" : "Avslått";
           return true;
         }
@@ -543,6 +549,8 @@
       let body = { message: msg };
       if (currentAgent === "deepseek") {
         endpoint = "/chat/deepseek";
+      } else if (currentAgent === "techai") {
+        endpoint = "/chat/techai";
       } else if (currentAgent === "collaborate") {
         endpoint = "/chat/collaborate";
         body = { message: msg, primary: "gemini" };

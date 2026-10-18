@@ -88,13 +88,21 @@ fun DashboardScreen(
                 title = {
                     Column {
                         Text("Super-Server Ubuntu", color = LightText)
-                        Text(RetrofitClient.BASE_URL, color = Color.Gray, style = MaterialTheme.typography.labelSmall)
+                        val user = prefs.getString("username", null)
+                        val role = prefs.getString("user_role", "user")
+                        if (user != null) {
+                            val roleLabel = if (role == "admin") "Administrator" else "Bruker"
+                            Text("$user ($roleLabel)", color = NeonBlue, style = MaterialTheme.typography.labelSmall)
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = DarkBackground
                 ),
                 actions = {
+                    TextButton(onClick = onLogout) {
+                        Text("Logg ut", color = Color(0xFFFF5252))
+                    }
                     IconButton(onClick = {
                         tempIp = RetrofitClient.BASE_URL
                         tempToken = RetrofitClient.API_TOKEN

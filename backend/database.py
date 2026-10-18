@@ -1,20 +1,21 @@
-"""Datalag: PostgreSQL hvis DATABASE_URL er satt, ellers lokal SQLite.
+"""Datalag: PostgreSQL hvis DATABASE_URL er satt, ellers lokal SQLite (backend/data/memory.db).
 
 Tabeller:
+  - users                    : brukere (brukernavn, passord-hash, rolle, innloggingsinfo)
+  - access_logs              : aktivitetslogg per bruker (IP, endepunkt, tidspunkt)
+  - subscriptions            : tilgang/abonnement
   - conversations + messages : samtalehistorikk (minne)
   - memory                   : fakta/notater agenten har lært seg
   - tasks                    : jobber agenten oppretter og fullfører
-
-SQL skrives med ?-plassholdere og oversettes til %s for PostgreSQL.
 """
 import os
 import sqlite3
 import threading
+from pathlib import Path
 
 from loguru import logger
 
-import config
-
+BASE_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
 _SCHEMA = [
@@ -57,6 +58,9 @@ _SCHEMA = [
         is_banned BOOLEAN DEFAULT FALSE,
         ban_reason TEXT,
         friend_notes TEXT,
+        last_login_at TIMESTAMP,
+        last_ip TEXT,
+        login_count INTEGER DEFAULT 0,
         banned_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -64,10 +68,10 @@ _SCHEMA = [
     """CREATE TABLE IF NOT EXISTS subscriptions (
         id TEXT PRIMARY KEY,
         user_id TEXT UNIQUE NOT NULL,
-        plan_name TEXT DEFAULT 'Annual Peace Pass',
-        price_eur NUMERIC DEFAULT 30.00,
-        status TEXT DEFAULT 'pending',
-        started_at TIMESTAMP,
+        plan_name TEXT DEFAULT 'Standard Pass',
+        price_eur NUMERIC DEFAULT 0.00,
+        status TEXT DEFAULT 'active',
+        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         expires_at TIMESTAMP,
         payment_method TEXT,
         notes TEXT,
@@ -77,6 +81,7 @@ _SCHEMA = [
     """CREATE TABLE IF NOT EXISTS access_logs (
         id TEXT PRIMARY KEY,
         user_id TEXT,
+        username TEXT,
         endpoint TEXT NOT NULL,
         allowed BOOLEAN DEFAULT TRUE,
         blocked_reason TEXT,
@@ -95,8 +100,6 @@ class Database:
     def __init__(self, connection, backend: str):
         self.conn = connection
         self.backend = backend  # "postgres" eller "sqlite"
-        # Én lås for all DB-tilgang. SQLite-tilkoblinger kan ikke brukes fra
-        # flere tråder samtidig, og FastAPI kjører endepunktene i trådpoolen.
         self._lock = threading.Lock()
 
     def _sql(self, query: str) -> str:
@@ -135,10 +138,8 @@ _db: Database | None = None
 
 
 def _init_sqlite() -> Database:
-    data_dir = config.BASE_DIR / "data"
+    data_dir = BASE_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    # check_same_thread=False + låsen i Database-klassen gjør det trygt at
-    # FastAPI bruker tilkoblingen fra forskjellige worker-tråder.
     conn = sqlite3.connect(data_dir / "memory.db", check_same_thread=False)
     return Database(conn, "sqlite")
 
@@ -151,23 +152,13 @@ def _init_postgres() -> Database:
 
 
 def init_db() -> None:
-    """Kobler til databasen og oppretter tabellene. Trygg å kalle flere ganger."""
+    """Kobler til lokal SQLite-database på serveren (backend/data/memory.db) og oppretter tabellene."""
     global _db
     if _db is not None:
         return
 
-    if DATABASE_URL:
-        try:
-            _db = _init_postgres()
-            logger.info("Koblet til PostgreSQL.")
-        except Exception as e:
-            logger.error("PostgreSQL feilet ({}). Faller tilbake til lokal SQLite.", e)
-            _db = _init_sqlite()
-    else:
-        logger.warning(
-            "DATABASE_URL mangler i .env - bruker lokal SQLite (deles ikke mellom maskiner)."
-        )
-        _db = _init_sqlite()
+    _db = _init_sqlite()
+    logger.info("Lokal SQL-database aktiv på serveren: {}", BASE_DIR / "data" / "memory.db")
 
     for stmt in _SCHEMA:
         try:
@@ -175,8 +166,21 @@ def init_db() -> None:
         except Exception as e:
             logger.error("Kunne ikke opprette tabell: {} - {}", stmt[:60], e)
 
+    # Sørg for at nye kolonner også finnes i eksisterende SQLite-tabeller
+    for alter_sql in (
+        "ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP",
+        "ALTER TABLE users ADD COLUMN last_ip TEXT",
+        "ALTER TABLE users ADD COLUMN login_count INTEGER DEFAULT 0",
+        "ALTER TABLE access_logs ADD COLUMN username TEXT",
+    ):
+        try:
+            _db.execute(alter_sql)
+        except Exception:
+            pass
 
-def get_db() -> Database | None:
+
+def get_db() -> Database:
     if _db is None:
         init_db()
+    assert _db is not None
     return _db

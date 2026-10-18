@@ -64,7 +64,7 @@ data class RecentChangesResponse(
 
 data class CollaborateRequest(
     val message: String,
-    val primary: String   // "gemini", "deepseek" eller "techai"
+    val primary: String
 )
 
 data class AgentAnswer(
@@ -117,6 +117,39 @@ data class AgentTaskResponse(
     val review: ReviewResult? = null
 )
 
+// --- Autentisering mot lokal SQL-database (/auth/login & /auth/register) ---
+
+data class UserInfo(
+    val id: String = "",
+    val username: String = "",
+    val role: String = "",
+    val is_vip: Boolean = false
+)
+
+data class LoginRequest(
+    val username: String,
+    val password: String
+)
+
+data class LoginResponse(
+    val token: String = "",
+    val user: UserInfo? = null,
+    val access: String = "",
+    val reason: String = ""
+)
+
+data class RegisterRequest(
+    val username: String,
+    val password: String,
+    val email: String? = null
+)
+
+data class RegisterResponse(
+    val id: String = "",
+    val username: String = "",
+    val role: String = ""
+)
+
 interface ServerApiService {
     @GET("stats")
     suspend fun getStats(): ServerStats
@@ -147,6 +180,12 @@ interface ServerApiService {
 
     @POST("chat/agent")
     suspend fun runAgent(@Body request: AgentTaskRequest): AgentTaskResponse
+
+    @POST("auth/login")
+    suspend fun login(@Body request: LoginRequest): LoginResponse
+
+    @POST("auth/register")
+    suspend fun register(@Body request: RegisterRequest): RegisterResponse
 }
 
 object RetrofitClient {
@@ -162,7 +201,6 @@ object RetrofitClient {
         return u
     }
 
-    // Standard Tailscale-server (kan endres i appen)
     private var _baseUrl = "http://100.115.248.101:8000/"
     var BASE_URL: String
         get() = _baseUrl
@@ -174,12 +212,19 @@ object RetrofitClient {
             }
         }
 
-    // Standard X-API-Token (kan endres i appen)
     private var _apiToken: String = "servidor123"
     var API_TOKEN: String
         get() = _apiToken
         set(value) {
             _apiToken = value.trim()
+            _api = null
+        }
+
+    private var _jwtToken: String = ""
+    var JWT_TOKEN: String
+        get() = _jwtToken
+        set(value) {
+            _jwtToken = value.trim()
             _api = null
         }
 
@@ -190,6 +235,9 @@ object RetrofitClient {
             .writeTimeout(60, TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val builder = chain.request().newBuilder()
+                if (_jwtToken.isNotEmpty()) {
+                    builder.header("Authorization", "Bearer $_jwtToken")
+                }
                 if (_apiToken.isNotEmpty()) {
                     builder.header("X-API-Token", _apiToken)
                 }

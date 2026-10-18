@@ -25,10 +25,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Last lagret Tailscale server-URL og X-API-Token
         val prefs = getSharedPreferences("server_prefs", MODE_PRIVATE)
         prefs.getString("server_ip", null)?.let { RetrofitClient.BASE_URL = it }
         prefs.getString("api_token", null)?.let { RetrofitClient.API_TOKEN = it }
+        prefs.getString("auth_token", null)?.let { RetrofitClient.JWT_TOKEN = it }
 
         enableEdgeToEdge()
         setContent {
@@ -44,8 +44,7 @@ fun ServidorApp() {
     val navController = rememberNavController()
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("server_prefs", Context.MODE_PRIVATE) }
-    val hasSavedServer = prefs.getString("server_ip", null) != null && prefs.getString("api_token", null) != null
-    val startDestination = if (hasSavedServer) "dashboard" else "login"
+    val startDestination = if (prefs.getString("auth_token", null) != null) "dashboard" else "login"
 
     NavHost(navController = navController, startDestination = startDestination) {
         composable("login") {
@@ -69,7 +68,11 @@ fun ServidorApp() {
                     }
                 },
                 onLogout = {
-                    navController.navigate("login")
+                    prefs.edit().remove("auth_token").remove("username").remove("user_role").apply()
+                    RetrofitClient.JWT_TOKEN = ""
+                    navController.navigate("login") {
+                        popUpTo(0) { inclusive = true }
+                    }
                 }
             )
         }
