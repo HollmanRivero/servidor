@@ -15,8 +15,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.pepito.servidor.network.ForgotPasswordRequest
 import com.pepito.servidor.network.LoginRequest
 import com.pepito.servidor.network.RegisterRequest
+import com.pepito.servidor.network.ResetPasswordRequest
 import com.pepito.servidor.network.RetrofitClient
 import com.pepito.servidor.ui.theme.DarkBackground
 import com.pepito.servidor.ui.theme.LightText
@@ -35,6 +37,12 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
     var showSettings by remember { mutableStateOf(false) }
     var tempIp by remember { mutableStateOf(RetrofitClient.BASE_URL) }
     var tempToken by remember { mutableStateOf(RetrofitClient.API_TOKEN) }
+    var showReset by remember { mutableStateOf(false) }
+    var resetUser by remember { mutableStateOf("") }
+    var resetCode by remember { mutableStateOf("") }
+    var resetNewPassword by remember { mutableStateOf("") }
+    var resetError by remember { mutableStateOf<String?>(null) }
+    var resetInfo by remember { mutableStateOf<String?>(null) }
 
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("server_prefs", Context.MODE_PRIVATE) }
@@ -165,7 +173,132 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                     color = NeonBlue
                 )
             }
+            TextButton(onClick = {
+                resetUser = username.trim()
+                resetInfo = null
+                resetError = null
+                resetCode = ""
+                resetNewPassword = ""
+                showReset = true
+            }) {
+                Text("Glemt passord?", color = NeonBlue)
+            }
         }
+    }
+
+    if (showReset) {
+        AlertDialog(
+            onDismissRequest = { showReset = false },
+            title = { Text("Glemt passord") },
+            text = {
+                Column {
+                    Text(
+                        "Be administratoren om en engangskode. " +
+                            "Han lager den på serveren med: python reset_password.py --user <navn>"
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = resetUser,
+                        onValueChange = { resetUser = it },
+                        label = { Text("Brukernavn") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = resetCode,
+                        onValueChange = { resetCode = it },
+                        label = { Text("Engangskode (6 siffer)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = resetNewPassword,
+                        onValueChange = { resetNewPassword = it },
+                        label = { Text("Nytt passord") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    resetError?.let { msg ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(msg, color = Color(0xFFFF5252))
+                    }
+                    resetInfo?.let { msg ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(msg, color = NeonBlue)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextButton(
+                        onClick = {
+                            if (resetUser.isBlank()) {
+                                resetError = "Skriv inn brukernavnet ditt"
+                                return@TextButton
+                            }
+                            resetError = null
+                            scope.launch {
+                                try {
+                                    val resp = RetrofitClient.api.forgotPassword(
+                                        ForgotPasswordRequest(resetUser.trim())
+                                    )
+                                    resetInfo = resp.message
+                                } catch (e: Exception) {
+                                    resetError = "Kunne ikke kontakte serveren (${e.message})"
+                                }
+                            }
+                        }
+                    ) {
+                        Text("Jeg har ikke fått noen kode ennå", color = NeonBlue)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    if (resetUser.isBlank() || resetCode.isBlank()) {
+                        resetError = "Fyll inn brukernavn og engangskode"
+                        return@Button
+                    }
+                    if (resetNewPassword.length < 4) {
+                        resetError = "Nytt passord må ha minst 4 tegn"
+                        return@Button
+                    }
+                    resetError = null
+                    resetInfo = null
+                    scope.launch {
+                        try {
+                            val resp = RetrofitClient.api.resetPassword(
+                                ResetPasswordRequest(
+                                    resetUser.trim(),
+                                    resetCode.trim(),
+                                    resetNewPassword
+                                )
+                            )
+                            username = resetUser.trim()
+                            password = ""
+                            error = resp.message.ifBlank { "Passordet er endret. Logg inn." }
+                            showReset = false
+                        } catch (e: HttpException) {
+                            resetError = when (e.code()) {
+                                400 -> "Feil eller utløpt kode. Be om en ny."
+                                else -> "Serveren svarte med feil ${e.code()}"
+                            }
+                        } catch (e: Exception) {
+                            resetError = "Kunne ikke kontakte serveren (${e.message})"
+                        }
+                    }
+                }) {
+                    Text("Bytt passord")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showReset = false }) {
+                    Text("Avbryt")
+                }
+            }
+        )
     }
 
     if (showSettings) {

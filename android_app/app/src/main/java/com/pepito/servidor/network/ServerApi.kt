@@ -138,6 +138,21 @@ data class LoginResponse(
     val reason: String = ""
 )
 
+data class ForgotPasswordRequest(
+    val username: String
+)
+
+data class ResetPasswordRequest(
+    val username: String,
+    val code: String,
+    val new_password: String
+)
+
+data class MessageResponse(
+    val ok: Boolean = false,
+    val message: String = ""
+)
+
 data class RegisterRequest(
     val username: String,
     val password: String,
@@ -237,6 +252,12 @@ interface ServerApiService {
 
     @POST("auth/register")
     suspend fun register(@Body request: RegisterRequest): RegisterResponse
+
+    @POST("auth/forgot-password")
+    suspend fun forgotPassword(@Body request: ForgotPasswordRequest): MessageResponse
+
+    @POST("auth/reset-password")
+    suspend fun resetPassword(@Body request: ResetPasswordRequest): MessageResponse
 
     @POST("errors/report")
     suspend fun reportError(@Body request: ErrorReportRequest)

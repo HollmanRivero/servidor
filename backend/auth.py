@@ -294,6 +294,73 @@ def create_user(
     return get_user_by_id(uid) or {"id": uid, "username": clean_name, "role": final_role}
 
 
+RESET_CODE_MINUTES = int(os.environ.get("RESET_CODE_MINUTES", "30"))
+
+
+def create_reset_code(username: str) -> tuple[str, str] | None:
+    """Lager en engangskode for passordtilbakestilling.
+
+    Koden vises ÉN gang (til administratoren, som gir den videre til brukeren)
+    og lagres bare som hash. Returnerer (kode, utløper) eller None hvis
+    brukeren ikke finnes."""
+    user = get_user_by_username(username)
+    if not user:
+        return None
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=RESET_CODE_MINUTES)
+    expires_str = expires.strftime("%Y-%m-%d %H:%M:%S")
+    db = _db()
+    # Bare den nyeste koden skal gjelde
+    db.execute("UPDATE password_resets SET used = ? WHERE user_id = ? AND used = ?", (1, user["id"], 0))
+    db.execute(
+        "INSERT INTO password_resets (id, user_id, username, code_hash, expires_at, used) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (uuid.uuid4().hex, user["id"], user["username"], hash_password(code), expires_str, 0),
+    )
+    logger.warning("Passordtilbakestilling: ny engangskode for '{}' (gyldig {} min)", user["username"], RESET_CODE_MINUTES)
+    return code, expires_str
+
+
+def redeem_reset_code(username: str, code: str, new_password: str) -> bool:
+    """Bytter passordet hvis koden er riktig, ikke utløpt og ikke brukt."""
+    user = get_user_by_username(username)
+    if not user:
+        return False
+    clean_code = (code or "").strip()
+    if not clean_code or len(new_password or "") < 4:
+        return False
+    db = _db()
+    row = db.fetchone(
+        "SELECT * FROM password_resets WHERE user_id = ? AND used = ? ORDER BY created_at DESC LIMIT 1",
+        (user["id"], 0),
+    )
+    if not row:
+        return False
+    try:
+        expires = datetime.datetime.strptime(str(row["expires_at"])[:19], "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return False
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    if expires < now:
+        logger.warning("Passordtilbakestilling: koden for '{}' er utløpt", user["username"])
+        return False
+    if not verify_password(clean_code, row["code_hash"] or ""):
+        logger.warning("Passordtilbakestilling: feil kode for '{}'", user["username"])
+        return False
+
+    db.execute(
+        "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+        (
+            hash_password(new_password),
+            datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            user["id"],
+        ),
+    )
+    db.execute("UPDATE password_resets SET used = ? WHERE id = ?", (1, row["id"]))
+    logger.warning("Passordtilbakestilling: passordet til '{}' er endret", user["username"])
+    return True
+
+
 def login(username: str, password: str, ip_address: str = "") -> dict | None:
     user = get_user_by_username(username)
     if not user:

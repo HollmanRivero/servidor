@@ -25,6 +25,7 @@ accesible a través de Tailscale** — nada queda expuesto a internet.
 - [Parte 3 — Conectar el móvil](#parte-3--conectar-el-móvil)
 - [Referencia de la API](#referencia-de-la-api)
 - [Cómo funcionan los agentes de IA](docs/README.md) — cómo añadir tu propia IA
+- [Administración de usuarios](backend/admin_queries.sql) — SQL para admin, ban, VIP y contraseñas
 - [Uso diario](#uso-diario)
 - [Seguridad](#seguridad)
 - [Solución de problemas](#solución-de-problemas)
@@ -242,6 +243,8 @@ Sin token válido responden `401`.
 | `GET` | `/chat/providers` | Lista los agentes, si están configurados y su orden de fallback |
 | `POST` | `/chat/agent` | Agente autónomo con herramientas |
 | `POST` | `/chat/collaborate` | Un agente responde y el otro revisa. Body: `{"message": "...", "primary": "gemini"}` |
+| `POST` | `/auth/forgot-password` | Pide ayuda para recuperar la contraseña. Body: `{"username": "..."}`. **Abierta** |
+| `POST` | `/auth/reset-password` | Cambia la contraseña con el código de un solo uso. Body: `{"username":"...","code":"123456","new_password":"..."}`. **Abierta** |
 
 Ejemplo:
 

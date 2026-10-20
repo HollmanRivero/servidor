@@ -101,6 +101,15 @@ _SCHEMA = [
         resolved BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""",
+    """CREATE TABLE IF NOT EXISTS password_resets (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        username TEXT NOT NULL,
+        code_hash TEXT NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        used BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
     "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id)",
     "CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory(kind)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",

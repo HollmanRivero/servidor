@@ -149,7 +149,15 @@ AGENT_SHELL_TIMEOUT = int(os.environ.get("AGENT_SHELL_TIMEOUT", "180"))
 MAX_OUTPUT_CHARS = 12000
 
 # Disse kan nås uten token: helsesjekk + innlogging/registrering + feilrapportering fra appen.
-OPEN_PATHS = {"/", "/health", "/auth/login", "/auth/register", "/errors/report"}
+OPEN_PATHS = {
+    "/",
+    "/health",
+    "/auth/login",
+    "/auth/register",
+    "/auth/forgot-password",
+    "/auth/reset-password",
+    "/errors/report",
+}
 
 # Tailscale auto-connect konfigurasjon (leses fra backend/.env)
 TAILSCALE_AUTH_KEY = os.environ.get("TAILSCALE_AUTH_KEY", "").strip()
@@ -2079,6 +2087,55 @@ def auth_me(request: Request):
         "access": state,
         "reason": reason,
     }
+
+
+class ForgotPasswordRequest(BaseModel):
+    username: str
+
+
+class ResetPasswordRequest(BaseModel):
+    username: str
+    code: str
+    new_password: str
+
+
+@app.post("/auth/forgot-password")
+def auth_forgot_password(body: ForgotPasswordRequest, request: Request):
+    """Åpen rute: brukeren ber om hjelp. Vi sier aldri om brukernavnet finnes,
+    slik at ruten ikke kan brukes til å kartlegge kontoer.
+
+    Koden lages av administratoren (backend/reset_password.py) og gis til
+    brukeren utenfor appen. Serveren har ingen e-postutsending."""
+    username = body.username.strip()
+    client_ip = request.client.host if request.client else ""
+    user = auth.get_user_by_username(username) if username else None
+    auth.log_user_activity(
+        "/auth/forgot-password",
+        user or {"id": None, "username": username or "(tomt)"},
+        client_ip,
+        allowed=True,
+    )
+    if user:
+        logger.warning("Passordtilbakestilling forespurt for '{}' fra {}", user["username"], client_ip)
+    return {
+        "message": (
+            "Spør administratoren om en engangskode. "
+            "På serveren kjører han: python reset_password.py --user <brukernavn>"
+        )
+    }
+
+
+@app.post("/auth/reset-password")
+def auth_reset_password(body: ResetPasswordRequest):
+    """Bytter passord med engangskode fra administratoren."""
+    if len(body.new_password or "") < 4:
+        raise HTTPException(status_code=400, detail="Nytt passord må ha minst 4 tegn.")
+    if not auth.redeem_reset_code(body.username.strip(), body.code, body.new_password):
+        raise HTTPException(
+            status_code=400,
+            detail="Feil eller utløpt kode. Be administratoren om en ny engangskode.",
+        )
+    return {"ok": True, "message": "Passordet er endret. Du kan logge inn nå."}
 
 
 @app.get("/admin/users")
