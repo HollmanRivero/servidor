@@ -207,3 +207,11 @@ def get_db() -> Database:
         init_db()
     assert _db is not None
     return _db
+
+
+def describe() -> str:
+    """Hvilken database serveren faktisk bruker. Vises i /health."""
+    db = get_db()
+    if db.backend == "postgres":
+        return "postgres (DATABASE_URL)"
+    return f"sqlite ({BASE_DIR / 'data' / 'memory.db'})"

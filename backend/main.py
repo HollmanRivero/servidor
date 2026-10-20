@@ -534,6 +534,7 @@ def health():
         "status": "ok",
         "version": "2.0",
         "os": OS_DESCRIPTION,
+        "database": database.describe(),
         "listen": f"{HOST}:{PORT}",
         "auth_required": bool(VALID_TOKENS),
         "projects_dir": str(PROJECTS_DIR),
