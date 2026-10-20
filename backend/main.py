@@ -998,9 +998,17 @@ def _ask_techai(prompt: str, json_mode: bool = False) -> tuple[str, str]:
     if not TECH_AI_API_KEY and not os.environ.get("TECH_AI_API_URL"):
         raise RuntimeError("TECH_AI_API_KEY / TECH_AI_API_URL mangler i backend/.env")
 
+    # tech-ai.tech ligger bak Cloudflare. Uten en nettleserlik User-Agent
+    # svarer Cloudflare "error code: 1010" (403) for alle POST-kall, sa
+    # Tech-AI virket aldri fra serveren. Authorization: Bearer er headeren
+    # API-et faktisk godtar (X-API-Key gir 401 Invalid API key).
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "Super-Server/2.0",
+        "Accept": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
     }
     if TECH_AI_API_KEY:
         headers["Authorization"] = f"Bearer {TECH_AI_API_KEY}"
@@ -1023,18 +1031,19 @@ def _ask_techai(prompt: str, json_mode: bool = False) -> tuple[str, str]:
         "stream": False,
     }
 
+    # api.tech-ai.tech finnes ikke (DNS), så den er fjernet. Rekkefolgen under
+    # er de url-ene som faktisk svarer på tech-ai.tech.
     candidate_urls = [
         TECH_AI_API_URL,
-        "https://tech-ai.tech/api/chat",
         "https://tech-ai.tech/v1/chat/completions",
-        "https://api.tech-ai.tech/v1/chat/completions",
+        "https://tech-ai.tech/api/chat",
     ]
     seen_urls: list[str] = []
     for u in candidate_urls:
         if u and u not in seen_urls:
             seen_urls.append(u)
 
-    last_err: Exception | None = None
+    problems: list[str] = []
     for url in seen_urls:
         try:
             result = _post_json(url, payload, headers, timeout=90)
@@ -1047,10 +1056,12 @@ def _ask_techai(prompt: str, json_mode: bool = False) -> tuple[str, str]:
                 if key in result and isinstance(result[key], str) and result[key].strip():
                     return result[key].strip(), TECH_AI_MODEL
         except Exception as e:
-            last_err = e
+            # Ta vare pa alle feilene: den siste var ofte en DNS-feil fra en
+            # dod kandidat-URL og skjulte den ekte arsaken (f.eks. HTTP 502).
+            problems.append(f"{url.split('//')[-1]}: {_error_detail(e)}")
             continue
 
-    raise RuntimeError(f"Tech-AI endepunkt svarte ikke ({_error_detail(last_err) if last_err else 'ukjent feil'})")
+    raise RuntimeError("Tech-AI svarte ikke. " + " | ".join(problems[:3]))
 
 
 @app.post("/chat/gemini")
@@ -1097,7 +1108,7 @@ def chat_techai(body: ChatRequest):
     try:
         if DEEPSEEK_API_KEY:
             text, _model = _ask_deepseek(f"{TECH_AI_SYSTEM}\n\nBruker: {user_message}")
-            return {"reply": text}
+            return {"reply": f"(Svar via DeepSeek-fallback fordi Tech-AI var utilgjengelig)\n\n{text}"}
         if GEMINI_API_KEY:
             text, _model = _ask_gemini(f"{TECH_AI_SYSTEM}\n\nBruker: {user_message}\nTech-AI:")
             return {"reply": text}
