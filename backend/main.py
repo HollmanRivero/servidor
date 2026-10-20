@@ -1532,6 +1532,9 @@ VIKTIGE REGLER:
 1. Du har full tilgang til å opprette, lese, redigere, flytte, kopiere og slette mapper og filer på hele serveren (relativt til valgt prosjektmappe, i 'servidor', i '~', eller via absolutte stier på Linux, macOS og Windows).
 2. Tilpass shell-kommandoer til operativsystemet på serveren ({OS_DESCRIPTION}): bruk Bash/POSIX på Linux og macOS, og CMD/PowerShell-kompatible kommandoer på Windows.
 3. Svar KUN med ett gyldig JSON-objekt per steg (ingen markdown-kodeblokk rundt, ingen ekstra tekst).
+4. Svar KORT. Hele svaret må være under ca. 1200 tegn. Skal du skrive en stor fil, skriv
+   den i biter: første del med "write_file", resten med "append_file" i neste steg.
+   Ellers blir JSON-en avkuttet og steget mislykkes.
 
 JSON-format (velg nøyaktig ett skjema per steg):
 - Skrive eller overskrive fil:
@@ -1771,11 +1774,29 @@ def chat_agent(body: AgentTaskRequest):
             action_obj = _extract_json_object(raw_reply)
             if not action_obj:
                 consecutive_parse_errors += 1
-                logger.warning("Ugyldig JSON fra {} i steg {}: {!r}", author, step_num, auth.redact_secrets(raw_reply[:200]))
-                history_notes.append(
-                    f"Steg {step_num}: Ditt forrige svar var ikke gyldig JSON. "
-                    "Du MÅ svare med KUN ett JSON-objekt med feltene thought, action og done."
+                truncated = raw_reply.count("{") > raw_reply.count("}")
+                logger.warning(
+                    "Ugyldig JSON fra {} i steg {} ({}): {!r}",
+                    author,
+                    step_num,
+                    "AVKUTTET av token-grensen" if truncated else "ugyldig",
+                    auth.redact_secrets(raw_reply[:200]),
                 )
+                if truncated:
+                    # Modellen traff maks output-tokens midt i en streng. Da maa
+                    # neste forsok vaere kortere, ellers gjentar det seg i det
+                    # uendelige. Vi reparerer ikke JSON-en: en halv 'content'
+                    # ville skrevet en halv fil.
+                    history_notes.append(
+                        f"Steg {step_num}: Svaret ditt ble AVKUTTET fordi det ble for langt. "
+                        "Svar KUN med ett JSON-objekt, hold 'content' under 1200 tegn, "
+                        "og bruk handlingen append_file for resten av filen."
+                    )
+                else:
+                    history_notes.append(
+                        f"Steg {step_num}: Ditt forrige svar var ikke gyldig JSON. "
+                        "Du MÅ svare med KUN ett JSON-objekt med feltene thought, action og done."
+                    )
                 if consecutive_parse_errors >= 4:
                     primary_key = reviewer_key
                 continue
