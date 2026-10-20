@@ -6,6 +6,7 @@ koden må gis til brukeren på annen måte (SMS, Signal, si det ansikt til ansik
 
     cd backend && ../.venv/bin/python reset_password.py --user kari
     cd backend && ../.venv/bin/python reset_password.py --list
+    cd backend && ../.venv/bin/python reset_password.py --find kari
     cd backend && ../.venv/bin/python reset_password.py --user kari --set-passord nyttpassord
 
 Engangskoden er gyldig i RESET_CODE_MINUTES minutter (standard 30), kan bare
@@ -27,6 +28,22 @@ def main() -> int:
         return 0
 
     database.init_db()
+
+    if "--find" in args:
+        text = args[args.index("--find") + 1].strip()
+        if not text:
+            print("Bruk: --find <tekst>")
+            return 2
+        users = auth.list_all_users()
+        hits = [u for u in users if text.lower() in str(u.get("username", "")).lower()]
+        if not hits:
+            print(f"Ingen brukere inneholder '{text}'.")
+            return 1
+        print(f"{'brukernavn':<24} {'rolle':<8} {'bannet':<7} opprettet")
+        print("-" * 62)
+        for u in hits:
+            print(f"{u['username']:<24} {u.get('role', ''):<8} {('ja' if u.get('is_banned') else 'nei'):<7} {u.get('created_at', '')}")
+        return 0
 
     if "--list" in args:
         users = auth.list_all_users()

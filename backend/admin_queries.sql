@@ -8,9 +8,12 @@
 --   uten DATABASE_URL ->  backend/data/memory.db   (SQLite, dette er standard)
 --   med DATABASE_URL  ->  Postgres (delen nederst i filen)
 --
--- SLIK KJORER DU MOT SQLITE:
+-- SLIK KJORER DU MOT SQLITE  (VIKTIG: du maa staa inne i backend/):
 --
---   cd backend
+--   cd ~/Dokumenter/MyGits/servidor/servidor/backend      <-- hit forst!
+--   pwd                                                  <-- skal slutte pa /backend
+--   ls data/memory.db                                    <-- skal finnes
+--
 --   sqlite3 data/memory.db                       # apne shell
 --   sqlite> .tables                              # se tabellene
 --   sqlite> UPDATE users SET role='admin' WHERE username='dittnavn';
@@ -19,10 +22,22 @@
 --   eller uten shell, rett fra kommandolinjen:
 --   sqlite3 data/memory.db "SELECT username, role FROM users;"
 --
+--   Star du i repo-roten (ikke backend/), er stien backend/data/memory.db:
+--   sqlite3 backend/data/memory.db "SELECT username, role FROM users;"
+--
+--   Feilen "cp: klarte ikke a hente informasjon om 'data/memory.db'" betyr at
+--   du star i feil mappe - filen ligger i backend/data/, ikke i data/.
+--
 --   Er ikke sqlite3 installert:  sudo apt install -y sqlite3
 --
+-- SOKE ETTER BRUKERE:
+--   sqlite3 data/memory.db "SELECT username, role, is_banned FROM users WHERE username LIKE '%kari%';"
+--   eller uten sqlite3 i det hele tatt:
+--   ../.venv/bin/python reset_password.py --find kari
+--   ../.venv/bin/python reset_password.py --list
+--
 -- TIPS: skriv alltid WHERE pa UPDATE/DELETE. Uten WHERE treffer det alle rader.
--- Ta en kopi forst hvis du er usikker:  cp data/memory.db data/memory.db.bak
+-- Ta en kopi forst hvis du er usikker (fra backend/):  cp data/memory.db data/memory.db.bak
 --
 -- Passord kan du ikke lese ut (de er hashet). Glemt passord?
 --   ../.venv/bin/python reset_password.py --user <navn>              (engangskode)
