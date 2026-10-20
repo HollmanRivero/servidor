@@ -24,6 +24,7 @@ accesible a través de Tailscale** — nada queda expuesto a internet.
 - [Parte 2 — Compilar e instalar la app Android](#parte-2--compilar-e-instalar-la-app-android)
 - [Parte 3 — Conectar el móvil](#parte-3--conectar-el-móvil)
 - [Referencia de la API](#referencia-de-la-api)
+- [Cómo funcionan los agentes de IA](docs/README.md) — cómo añadir tu propia IA
 - [Uso diario](#uso-diario)
 - [Seguridad](#seguridad)
 - [Solución de problemas](#solución-de-problemas)
@@ -236,6 +237,10 @@ Sin token válido responden `401`.
 | `POST` | `/file?path=` | Guarda un fichero |
 | `POST` | `/chat/gemini` | Pregunta a Gemini. Body: `{"message": "..."}` |
 | `POST` | `/chat/deepseek` | Pregunta a DeepSeek. Body: `{"message": "..."}` |
+| `POST` | `/chat/techai` | Pregunta a Tech-AI. Body: `{"message": "..."}` |
+| `POST` | `/chat/provider/{key}` | Pregunta a cualquier agente registrado (también los tuyos) |
+| `GET` | `/chat/providers` | Lista los agentes, si están configurados y su orden de fallback |
+| `POST` | `/chat/agent` | Agente autónomo con herramientas |
 | `POST` | `/chat/collaborate` | Un agente responde y el otro revisa. Body: `{"message": "...", "primary": "gemini"}` |
 
 Ejemplo:

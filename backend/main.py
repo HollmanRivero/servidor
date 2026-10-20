@@ -12,7 +12,9 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 try:
     import psutil
@@ -539,6 +541,7 @@ def health():
         "gemini_key_configured": bool(GEMINI_API_KEY),
         "deepseek_key_configured": bool(DEEPSEEK_API_KEY),
         "techai_key_configured": bool(TECH_AI_API_KEY),
+        "ai_providers": [p.key for p in AGENT_PROVIDERS.values() if p.configured],
         "agent_shell_enabled": AGENT_SHELL_ENABLED,
         "tailscale_configured": bool(TAILSCALE_AUTH_KEY),
         "agent_running": _agent_state.get("running", False),
@@ -1098,6 +1101,54 @@ def chat_deepseek(body: ChatRequest):
         return {"reply": f"DeepSeek Feil: {_error_detail(e)}"}
 
 
+@app.get("/chat/providers")
+def chat_providers():
+    """Lister alle AI-agentene som er registrert i AGENT_PROVIDERS.
+    Appen kan bruke denne til å bygge fanene sine selv."""
+    return {
+        "providers": [provider.describe() for provider in AGENT_PROVIDERS.values()],
+        "configured": [p.key for p in AGENT_PROVIDERS.values() if p.configured],
+    }
+
+
+@app.post("/chat/provider/{key}")
+def chat_provider(key: str, body: ChatRequest):
+    """Generisk inngang for alle agenter i AGENT_PROVIDERS - også de du legger til
+    selv. /chat/gemini, /chat/deepseek og /chat/techai finnes fortsatt uendret."""
+    provider = AGENT_PROVIDERS.get((key or "").strip().lower())
+    if not provider:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Ukjent AI-agent '{key}'. Se GET /chat/providers.",
+        )
+
+    user_message = body.message.strip()
+    if not user_message:
+        return {"reply": f"Hei! Jeg er {provider.label}. Hva kan jeg hjelpe deg med?", "provider": provider.key}
+    if not provider.configured:
+        auth.log_error(
+            f"{provider.env_var} mangler i backend/.env",
+            source=f"ai_{provider.key}",
+            endpoint=f"POST /chat/provider/{provider.key}",
+        )
+        return {
+            "reply": f"{provider.label} Feil: {provider.env_var} mangler i backend/.env",
+            "provider": provider.key,
+        }
+
+    try:
+        text, model = _ask_agent(provider.key, user_message)
+        return {"reply": text, "provider": provider.key, "model": model}
+    except Exception as e:
+        logger.error("{} feilet: {}", provider.label, e)
+        auth.log_error(
+            _error_detail(e),
+            source=f"ai_{provider.key}",
+            endpoint=f"POST /chat/provider/{provider.key}",
+        )
+        return {"reply": f"{provider.label} Feil: {_error_detail(e)}", "provider": provider.key}
+
+
 # ---------------------------------------------------------------------------
 # Samarbeid mellom de to agentene
 # ---------------------------------------------------------------------------
@@ -1108,70 +1159,116 @@ class CollaborateRequest(BaseModel):
     primary: str = "gemini"  # "gemini", "deepseek" eller "techai"
 
 
+@dataclass(frozen=True)
+class AgentProvider:
+    """Én AI-agent tilgjengelig i /chat.
+
+    For å legge til en ny agent: skriv en `_ask_dinagent(prompt, json_mode)` som
+    returnerer `(tekst, modellnavn)`, og legg inn en oppføring i AGENT_PROVIDERS.
+    Da får den /chat/provider/<key>, oppføring i /chat/providers og fallback
+    automatisk. Se docs/README.md.
+    """
+
+    key: str
+    label: str
+    env_var: str
+    api_key: str
+    system_prompt: str
+    ask: Callable[[str, bool], tuple[str, str]]
+    aliases: tuple[str, ...]
+    fallbacks: tuple[str, ...]
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_key)
+
+    def describe(self) -> dict:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "env_var": self.env_var,
+            "configured": self.configured,
+            "aliases": list(self.aliases),
+            "fallbacks": list(self.fallbacks),
+        }
+
+
+# Rekkefølgen her bestemmer rekkefølgen i /chat/providers. `fallbacks` er
+# rekkefølgen agenten prøver hvis den selv feiler (kvote, overbelastning, nede).
+AGENT_PROVIDERS: dict[str, AgentProvider] = {
+    provider.key: provider
+    for provider in (
+        AgentProvider(
+            key="gemini",
+            label="Gemini",
+            env_var="GEMINI_API_KEY",
+            api_key=GEMINI_API_KEY,
+            system_prompt=GEMINI_SYSTEM,
+            ask=_ask_gemini,
+            aliases=("gemini", "gemi"),
+            fallbacks=("techai", "deepseek"),
+        ),
+        AgentProvider(
+            key="deepseek",
+            label="DeepSeek",
+            env_var="DEEPSEEK_API_KEY",
+            api_key=DEEPSEEK_API_KEY,
+            system_prompt=DEEPSEEK_SYSTEM,
+            ask=_ask_deepseek,
+            aliases=("deepseek", "deep"),
+            fallbacks=("techai", "gemini"),
+        ),
+        AgentProvider(
+            key="techai",
+            label="Tech-AI",
+            env_var="TECH_AI_API_KEY",
+            api_key=TECH_AI_API_KEY,
+            system_prompt=TECH_AI_SYSTEM,
+            ask=_ask_techai,
+            aliases=("techai", "tech-ai", "tech"),
+            fallbacks=("deepseek", "gemini"),
+        ),
+    )
+}
+
+
 def _normalize_agent(name: str) -> str:
     low = (name or "").strip().lower()
-    if low.startswith("deep"):
-        return "deepseek"
-    if low.startswith("tech"):
-        return "techai"
+    for provider in AGENT_PROVIDERS.values():
+        if any(low.startswith(alias) for alias in provider.aliases):
+            return provider.key
     if not GEMINI_API_KEY and TECH_AI_API_KEY:
         return "techai"
     return "gemini"
 
 
 def _agent_label(key: str) -> str:
-    if key == "deepseek":
-        return "DeepSeek"
-    if key == "techai":
-        return "Tech-AI"
-    return "Gemini"
+    provider = AGENT_PROVIDERS.get(key)
+    return provider.label if provider else AGENT_PROVIDERS["gemini"].label
 
 
 def _system_prompt(key: str) -> str:
-    if key == "deepseek":
-        return DEEPSEEK_SYSTEM
-    if key == "techai":
-        return TECH_AI_SYSTEM
-    return GEMINI_SYSTEM
+    provider = AGENT_PROVIDERS.get(key)
+    return provider.system_prompt if provider else AGENT_PROVIDERS["gemini"].system_prompt
 
 
 def _ask_agent(key: str, prompt: str, json_mode: bool = False) -> tuple[str, str]:
     """Sender prompt til valgt agent. Hvis hovedagenten er utilgjengelig/overbelastet,
     faller den automatisk tilbake til en av de andre konfigurerte AI-agentene slik at
     oppgaver aldri stopper!"""
-    if key == "deepseek":
-        try:
-            return _ask_deepseek(prompt, json_mode=json_mode)
-        except Exception as primary_err:
-            if TECH_AI_API_KEY:
-                logger.warning("DeepSeek feilet ({}), faller tilbake til Tech-AI...", primary_err)
-                return _ask_techai(prompt, json_mode=json_mode)
-            if GEMINI_API_KEY:
-                logger.warning("DeepSeek feilet ({}), faller tilbake til Gemini...", primary_err)
-                return _ask_gemini(prompt, json_mode=json_mode)
-            raise
-    elif key == "techai":
-        try:
-            return _ask_techai(prompt, json_mode=json_mode)
-        except Exception as primary_err:
-            if DEEPSEEK_API_KEY:
-                logger.warning("Tech-AI feilet ({}), faller tilbake til DeepSeek...", primary_err)
-                return _ask_deepseek(prompt, json_mode=json_mode)
-            if GEMINI_API_KEY:
-                logger.warning("Tech-AI feilet ({}), faller tilbake til Gemini...", primary_err)
-                return _ask_gemini(prompt, json_mode=json_mode)
-            raise
-    else:
-        try:
-            return _ask_gemini(prompt, json_mode=json_mode)
-        except Exception as primary_err:
-            if TECH_AI_API_KEY:
-                logger.warning("Gemini feilet ({}), faller tilbake til Tech-AI...", primary_err)
-                return _ask_techai(prompt, json_mode=json_mode)
-            if DEEPSEEK_API_KEY:
-                logger.warning("Gemini feilet ({}), faller tilbake til DeepSeek...", primary_err)
-                return _ask_deepseek(prompt, json_mode=json_mode)
-            raise
+    primary = AGENT_PROVIDERS.get(key) or AGENT_PROVIDERS["gemini"]
+    try:
+        return primary.ask(prompt, json_mode)
+    except Exception as primary_err:
+        for name in primary.fallbacks:
+            other = AGENT_PROVIDERS.get(name)
+            if not other or not other.configured:
+                continue
+            logger.warning(
+                "{} feilet ({}), faller tilbake til {}...", primary.label, primary_err, other.label
+            )
+            return other.ask(prompt, json_mode)
+        raise
 
 
 def _server_context() -> str:
