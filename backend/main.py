@@ -56,9 +56,9 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 TECH_AI_API_KEY = os.environ.get("TECH_AI_API_KEY", "").strip()
 TECH_AI_API_URL = os.environ.get(
     "TECH_AI_API_URL",
-    "https://tech-ai.tech/api/v1/chat/completions",
+    "https://tech-ai.tech/v1/chat/completions",
 ).strip()
-TECH_AI_MODEL = os.environ.get("TECH_AI_MODEL", "tech-ai").strip()
+TECH_AI_MODEL = os.environ.get("TECH_AI_MODEL", "tech-ai-monkey").strip()
 
 # Prøves i rekkefølge. Vi unngår utgåtte modeller (som gemini-2.5-flash / gemini-2.0-flash)
 # som alltid gir 404.
@@ -76,12 +76,26 @@ if not GEMINI_MODELS:
 # hvis en sterkere modell er tilgjengelig).
 _gemini_last_good: str | None = None
 
-# HTTP-koder der det er verdt å prøve på nytt på samme modell etter en kort pause.
-# 404 betyr at modellen ikke finnes, så da går vi rett videre til neste modell uten å vente.
-TRANSIENT_RETRY_STATUS = {408, 429, 500, 502, 503, 504}
-NEXT_MODEL_STATUS = {400, 404, 408, 429, 500, 502, 503, 504}
+# Gratisnivået til Gemini er 20 forespørsler per DAG per modell
+# (GenerateRequestsPerDayPerProjectPerModel-FreeTier). En modell som er kvotert ut
+# gir 429 i flere timer, så vi setter den på pause i stedet for å prøve den på hver
+# forespørsel. Tidsavbrudd og 5xx settes også på pause, ellers betaler hver enkelt
+# samtale flere titalls sekunder på en modell som henger.
+GEMINI_ATTEMPT_TIMEOUT = float(os.environ.get("GEMINI_ATTEMPT_TIMEOUT", "15"))
+GEMINI_TOTAL_BUDGET = float(os.environ.get("GEMINI_TOTAL_BUDGET", "30"))
+GEMINI_COOLDOWN_QUOTA = 600.0  # 429 uten oppgitt retryDelay
+GEMINI_COOLDOWN_BUSY = 60.0  # 503 overbelastet
+GEMINI_COOLDOWN_TIMEOUT = 1800.0  # henger / nettverksfeil
+GEMINI_COOLDOWN_BROKEN = 6 * 3600.0  # 400/404 - modellen finnes ikke eller tar ikke imot kallet
+GEMINI_COOLDOWN_MAX = 24 * 3600.0
 
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
+AUTH_ERROR_STATUS = {401, 403}
+RETRY_SAME_MODEL_STATUS = {408, 500, 502, 504}
+
+# modell -> (monotonic-tid den kan brukes igjen, årsak)
+_gemini_cooldown: dict[str, tuple[float, str]] = {}
+
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash").strip()
 
 # Personlighetene ligger som konstanter, slik at /chat/gemini, /chat/deepseek, /chat/techai og
 # /chat/collaborate oppfører seg likt.
@@ -517,6 +531,11 @@ def health():
         "projects_dir_exists": PROJECTS_DIR.is_dir(),
         "gemini_models": GEMINI_MODELS,
         "gemini_model_last_ok": _gemini_last_good,
+        "gemini_model_cooldowns": {
+            model: int(_gemini_cooldown_remaining(model))
+            for model in GEMINI_MODELS
+            if _gemini_cooldown_remaining(model) > 0
+        },
         "gemini_key_configured": bool(GEMINI_API_KEY),
         "deepseek_key_configured": bool(DEEPSEEK_API_KEY),
         "techai_key_configured": bool(TECH_AI_API_KEY),
@@ -718,12 +737,51 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
 def _error_detail(exc: Exception) -> str:
     """Henter feiltekst fra et HTTPError-svar uten å eksponere API-nøkkelen i URL-en."""
     if isinstance(exc, urllib.error.HTTPError):
-        try:
-            body = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            body = ""
-        return f"HTTP {exc.code}: {body[:300]}"
+        return f"HTTP {exc.code}: {_http_body(exc)[:300]}"
     return str(exc)
+
+
+def _http_body(exc: urllib.error.HTTPError) -> str:
+    """Leser feilresponsen. Kan bare kalles én gang per HTTPError."""
+    try:
+        return exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _parse_retry_delay(body: str, default: float) -> float:
+    """Henter RetryInfo.retryDelay (f.eks. "7710s") fra en Google-feilrespons.
+    Ved kvotetomming oppgir API-et selv hvor lenge modellen er ubrukelig."""
+    try:
+        details = json.loads(body).get("error", {}).get("details") or []
+    except Exception:
+        return default
+    for item in details:
+        if not isinstance(item, dict) or not str(item.get("@type", "")).endswith("RetryInfo"):
+            continue
+        try:
+            return min(GEMINI_COOLDOWN_MAX, max(1.0, float(str(item.get("retryDelay", "")).rstrip("s"))))
+        except ValueError:
+            return default
+    return default
+
+
+def _gemini_cooldown_remaining(model: str) -> float:
+    """Sekunder til modellen kan prøves igjen. 0 = klar nå."""
+    entry = _gemini_cooldown.get(model)
+    if not entry:
+        return 0.0
+    remaining = entry[0] - time.monotonic()
+    if remaining <= 0:
+        _gemini_cooldown.pop(model, None)
+        return 0.0
+    return remaining
+
+
+def _set_gemini_cooldown(model: str, seconds: float, reason: str) -> None:
+    seconds = min(GEMINI_COOLDOWN_MAX, max(1.0, seconds))
+    _gemini_cooldown[model] = (time.monotonic() + seconds, reason)
+    logger.warning("Gemini-modellen {} settes på pause i {}s ({})", model, int(seconds), reason)
 
 
 def _gemini_model_order() -> list[str]:
@@ -753,42 +811,66 @@ def _ask_gemini(prompt: str, json_mode: bool = False) -> tuple[str, str]:
         "generationConfig": gen_config,
     }
     problems: list[str] = []
+    paused: list[str] = []
+    deadline = time.monotonic() + GEMINI_TOTAL_BUDGET
 
     for model in _gemini_model_order():
+        wait = _gemini_cooldown_remaining(model)
+        if wait > 0:
+            paused.append(f"{model} (pause {int(wait)}s)")
+            continue
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 2:
+            problems.append("tidsbudsjettet for Gemini er brukt opp")
+            break
+
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
             f":generateContent?key={GEMINI_API_KEY}"
         )
+        payload_to_send = payload
         result = None
         for attempt in range(2):
             try:
-                result = _post_json(url, payload, timeout=35)
+                result = _post_json(
+                    url,
+                    payload_to_send,
+                    timeout=min(GEMINI_ATTEMPT_TIMEOUT, max(3.0, deadline - time.monotonic())),
+                )
                 break
             except urllib.error.HTTPError as e:
-                detail = _error_detail(e)
-                problems.append(f"{model} (forsøk {attempt + 1}): {detail}")
-                # Hvis en modell ikke støtter responseMimeType, prøv uten
-                if e.code == 400 and json_mode and "responseMimeType" in payload.get("generationConfig", {}):
-                    fallback_payload = {
-                        "contents": [{"parts": [{"text": prompt}]}],
+                body = _http_body(e)
+                detail = f"HTTP {e.code}: {body[:300]}"
+                problems.append(f"{model}: {detail}")
+                if e.code in AUTH_ERROR_STATUS:
+                    raise RuntimeError(
+                        f"Gemini avviser API-nøkkelen (HTTP {e.code}). "
+                        f"Sjekk GEMINI_API_KEY i backend/.env. {detail}"
+                    )
+                # Hvis en modell ikke støtter responseMimeType, prøv samme modell uten
+                if e.code == 400 and json_mode and "responseMimeType" in payload_to_send.get("generationConfig", {}):
+                    payload_to_send = {
+                        "contents": payload["contents"],
                         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8192},
                     }
-                    try:
-                        result = _post_json(url, fallback_payload, timeout=35)
-                        break
-                    except Exception as inner_e:
-                        problems.append(f"{model} (uten mime): {_error_detail(inner_e)}")
-                        break
-                if e.code in TRANSIENT_RETRY_STATUS and attempt == 0:
-                    logger.warning("Gemini-modellen {} svarte {} - venter 1.2s og prøver igjen", model, e.code)
-                    time.sleep(1.2)
                     continue
-                if e.code in NEXT_MODEL_STATUS:
-                    logger.warning("Gemini-modellen {} svarte {} - prøver neste modell", model, e.code)
+                if e.code == 429:
+                    _set_gemini_cooldown(
+                        model, _parse_retry_delay(body, GEMINI_COOLDOWN_QUOTA), "kvote brukt opp"
+                    )
+                elif e.code == 503:
+                    _set_gemini_cooldown(model, GEMINI_COOLDOWN_BUSY, "overbelastet")
+                elif e.code in (400, 404):
+                    _set_gemini_cooldown(model, GEMINI_COOLDOWN_BROKEN, f"HTTP {e.code}")
+                elif e.code in RETRY_SAME_MODEL_STATUS and attempt == 0:
+                    logger.warning("Gemini-modellen {} svarte {} - prøver igjen om 0.8s", model, e.code)
+                    time.sleep(0.8)
+                    continue
                 break
             except Exception as e:
                 problems.append(f"{model}: {_error_detail(e)}")
-                logger.warning("Gemini-kall mot {} feilet: {}", model, e)
+                _set_gemini_cooldown(model, GEMINI_COOLDOWN_TIMEOUT, "tidsavbrudd/tilkobling")
                 break
 
         if not result:
@@ -813,7 +895,10 @@ def _ask_gemini(prompt: str, json_mode: bool = False) -> tuple[str, str]:
         _gemini_last_good = model
         return text, model
 
-    raise RuntimeError("Ingen Gemini-modell svarte. " + " | ".join(problems[:4]))
+    summary = " | ".join(problems[:3])
+    if paused:
+        summary = (summary + " | " if summary else "") + "på pause: " + ", ".join(paused)
+    raise RuntimeError("Ingen Gemini-modell svarte. " + summary)
 
 
 def _ask_deepseek(prompt: str, json_mode: bool = False) -> tuple[str, str]:
@@ -847,7 +932,21 @@ def _ask_deepseek(prompt: str, json_mode: bool = False) -> tuple[str, str]:
     for attempt in range(2):
         try:
             result = _post_json(url, payload, headers, timeout=45)
-            return result["choices"][0]["message"]["content"], DEEPSEEK_MODEL
+            choice = result["choices"][0]
+            content = (choice.get("message", {}).get("content") or "").strip()
+            if content:
+                return content, DEEPSEEK_MODEL
+            # deepseek-flash er en resonnerende modell: skjulte resonnement-tokens
+            # teller mot max_tokens, så et lavt budsjett gir tomt svar.
+            last_err = RuntimeError(
+                f"DeepSeek ga tomt svar (finish_reason={choice.get('finish_reason')})"
+            )
+            payload["max_tokens"] = min(int(payload.get("max_tokens", 4096)) * 2, 16384)
+            logger.warning(
+                "DeepSeek svarte tomt ({}), prøver igjen med max_tokens={}",
+                choice.get("finish_reason"),
+                payload["max_tokens"],
+            )
         except Exception as e:
             last_err = e
             if json_mode and "response_format" in payload:
@@ -874,23 +973,20 @@ def _ask_techai(prompt: str, json_mode: bool = False) -> tuple[str, str]:
         headers["x-api-key"] = TECH_AI_API_KEY
 
     sys_msg = (
-        "Du er Tech-AI kodeagent på en Ubuntu-server. Svar kun med gyldig JSON."
+        "Du er Tech-AI kodeagent på en Ubuntu-server. Svar kun med gyldig JSON, uten markdown."
         if json_mode
         else TECH_AI_SYSTEM
     )
+    # Tech-AI (tech-ai-monkey) er en agent. System-rollen, response_format,
+    # max_tokens og de gamle message/prompt-feltene gjør at API-et henger.
+    # Én user-melding med en enkel OpenAI-kompatibel payload svarer på noen sekunder.
     payload: dict = {
         "model": TECH_AI_MODEL,
         "messages": [
-            {"role": "system", "content": sys_msg},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": f"{sys_msg}\n\nBruker: {prompt}\nTech-AI:"},
         ],
-        "message": prompt,
-        "prompt": prompt,
-        "max_tokens": 4096,
-        "temperature": 0.2 if json_mode else 0.5,
+        "stream": False,
     }
-    if json_mode:
-        payload["response_format"] = {"type": "json_object"}
 
     candidate_urls = [
         TECH_AI_API_URL,
@@ -906,7 +1002,7 @@ def _ask_techai(prompt: str, json_mode: bool = False) -> tuple[str, str]:
     last_err: Exception | None = None
     for url in seen_urls:
         try:
-            result = _post_json(url, payload, headers, timeout=30)
+            result = _post_json(url, payload, headers, timeout=90)
             if "choices" in result and result["choices"]:
                 msg = result["choices"][0].get("message") or {}
                 text = msg.get("content") or result["choices"][0].get("text") or ""

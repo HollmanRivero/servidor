@@ -171,12 +171,21 @@ via det tidligere `/file`-hullet:
 
 - Gemini: <https://aistudio.google.com/apikey>
 - DeepSeek: <https://platform.deepseek.com/api_keys>
+- Tech-AI monkey (valgfritt): <https://tech-ai.tech/dashboard/api-keys> — nøkkelen
+  starter med `tai_`, og modellen heter `tech-ai-monkey`.
 
 ```bash
 cd ~/Servidor_Super/backend
 printf 'GEMINI_API_KEY=ditt-nye\nDEEPSEEK_API_KEY=ditt-nye\n' >> .env
+# Valgfritt: Tech-AI monkey
+printf 'TECH_AI_API_KEY=tai_din_nokkel\n' >> .env
 sudo systemctl restart servidor-super
 ```
+
+Variabelnavnene må skrives nøyaktig: `TECH_AI_API_KEY`, `TECH_AI_API_URL`
+(standard `https://tech-ai.tech/v1/chat/completions`) og `TECH_AI_MODEL`
+(standard `tech-ai-monkey`). Sjekk med `curl http://127.0.0.1:8000/health` —
+`techai_key_configured` skal være `true`.
 
 ### 6. GitHub-token (repoene er private)
 
@@ -347,16 +356,22 @@ curl -s -X POST localhost:8000/auth/register \
 | Ingenting fra telefonen | `tailscale status` – er begge maskinene i samme tailnett? |
 | `No matching distribution found for pydantic-core` | Du har pinnet en gammel `pydantic`. Bruk `>=` i `requirements.txt` |
 | `ModuleNotFoundError: No module named 'flask'` | Gammel kode. `main.py` skal være FastAPI |
-| Gemini svarer «ingen modell svarte» | Sjekk `gemini_models` i `/health`; `*-latest`-aliasene blir ofte 503 |
+| Gemini svarer «ingen modell svarte» | Sjekk `gemini_models` og `gemini_model_cooldowns` i `/health`; `*-latest`-aliasene blir ofte 503 |
+| Gemini svarer «kvote brukt opp» / HTTP 429 | Gratisnivået er **20 kall per dag per modell**. Vent til `gemini_model_cooldowns` i `/health` er tom, eller legg inn en ny nøkkel med betalt kvote |
+| `deepseek_key_configured: false` selv om nøkkelen ligger i `.env` | Tjenesten startet før `.env` ble endret. `sudo systemctl restart servidor-super` |
 | Alt feiler etter en kodeendring | `journalctl -u servidor-super -n 40` |
 
 ## Daglig bruk
 
 ```bash
-sudo systemctl restart servidor-super     # etter endring i .env eller koden
+sudo systemctl restart servidor-super     # PÅKREVD etter endring i .env eller koden
 journalctl -u servidor-super -f           # se loggen live
 sudo systemctl stop servidor-super        # stoppe
 ```
+
+`.env` leses bare ved oppstart. Endrer du en nøkkel uten å starte tjenesten på
+nytt, fortsetter den å bruke den gamle nøkkelen – og `/health` viser
+`"deepseek_key_configured": false` selv om nøkkelen ligger i filen.
 
 ## Sikkerhet
 

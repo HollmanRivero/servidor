@@ -17,6 +17,12 @@ PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+TECH_AI_API_KEY = os.environ.get("TECH_AI_API_KEY", "").strip()
+TECH_AI_API_URL = os.environ.get(
+    "TECH_AI_API_URL",
+    "https://tech-ai.tech/v1/chat/completions",
+).strip()
+TECH_AI_MODEL = os.environ.get("TECH_AI_MODEL", "tech-ai-monkey").strip()
 API_TOKEN = os.environ.get("API_TOKEN", "").strip()
 
 # GitHub-token, slik at agenten kan klone PRIVATE repoer fra serveren.
@@ -26,7 +32,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 HOST = os.environ.get("HOST", "0.0.0.0").strip()
 PORT = int(os.environ.get("PORT", "8000"))
 
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash").strip()
 
 # Rekkefølge modellene prøves i. "-latest"-aliasene blir ofte 503 (overbelastet),
 # så vi faller videre. Overstyr med GEMINI_MODELS i .env.

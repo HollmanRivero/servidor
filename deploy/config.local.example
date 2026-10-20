@@ -15,9 +15,12 @@ GEMINI_API_KEY=
 # DeepSeek: https://platform.deepseek.com/api_keys
 DEEPSEEK_API_KEY=
 
-# --- Tech-AI (tech-ai.tech) Bygge-Agent (valgfritt) ---
-TECH_AI_API_URL=
+# --- Tech-AI monkey (tech-ai.tech) bygge-agent (valgfritt) ---
+# API-nokkel fra https://tech-ai.tech/dashboard/api-keys (starter med "tai_")
 TECH_AI_API_KEY=
+# La staa tom for standardverdiene under.
+# TECH_AI_API_URL=https://tech-ai.tech/v1/chat/completions
+# TECH_AI_MODEL=tech-ai-monkey
 
 # --- Delt token mellom server og mobilapp ---
 # Tom = genereres automatisk (eller skriv f.eks. et eget passord).

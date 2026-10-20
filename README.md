@@ -117,6 +117,7 @@ Rellena estos valores:
 | `API_TOKEN` | Tú la inventas: `openssl rand -hex 32` |
 | `GEMINI_API_KEY` | <https://aistudio.google.com/apikey> |
 | `DEEPSEEK_API_KEY` | <https://platform.deepseek.com/api_keys> |
+| `TECH_AI_API_KEY` | <https://tech-ai.tech/dashboard/api-keys> — clave `tai_…` (opcional, usa el modelo `tech-ai-monkey`) |
 | `GITHUB_TOKEN` | PAT con **Contents: Read** — solo si el agente va a clonar los repos privados |
 
 `API_TOKEN` es la clave compartida entre el móvil y el servidor: la app la envía en la

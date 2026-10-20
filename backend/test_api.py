@@ -1,15 +1,11 @@
 import os
 import json
 import urllib.request
+from pathlib import Path
 
-try:
-    with open('.env', 'r') as f:
-        for line in f:
-            if '=' in line:
-                key, val = line.strip().split('=', 1)
-                os.environ[key] = val
-except Exception:
-    pass
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().with_name(".env"))
 
 api_key = os.environ.get("DEEPSEEK_API_KEY")
 if not api_key:
@@ -22,7 +18,7 @@ headers = {
     "Authorization": f"Bearer {api_key}"
 }
 data = {
-    "model": "deepseek-chat",
+    "model": "deepseek-flash",
     "messages": [
         {"role": "user", "content": "Svar kun med ett ord: Hei!"}
     ]

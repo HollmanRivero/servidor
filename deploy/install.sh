@@ -73,6 +73,9 @@ TAILSCALE_HOSTNAME="servidor-super"
 TAILSCALE_AUTHKEY=""
 GEMINI_API_KEY=""
 DEEPSEEK_API_KEY=""
+TECH_AI_API_KEY=""
+TECH_AI_API_URL=""
+TECH_AI_MODEL=""
 API_TOKEN=""
 HOST=""
 PORT="8000"
@@ -234,8 +237,16 @@ fi
 ENV_API_TOKEN="$(get_env API_TOKEN)"
 ENV_GEMINI="$(get_env GEMINI_API_KEY)"
 ENV_DEEPSEEK="$(get_env DEEPSEEK_API_KEY)"
+ENV_TECH_AI="$(get_env TECH_AI_API_KEY)"
+ENV_TECH_AI_URL="$(get_env TECH_AI_API_URL)"
+ENV_TECH_AI_MODEL="$(get_env TECH_AI_MODEL)"
 
 FINAL_API_TOKEN="${API_TOKEN:-$ENV_API_TOKEN}"
+FINAL_GEMINI="${GEMINI_API_KEY:-$ENV_GEMINI}"
+FINAL_DEEPSEEK="${DEEPSEEK_API_KEY:-$ENV_DEEPSEEK}"
+FINAL_TECH_AI="${TECH_AI_API_KEY:-$ENV_TECH_AI}"
+FINAL_TECH_AI_URL="${TECH_AI_API_URL:-$ENV_TECH_AI_URL}"
+FINAL_TECH_AI_MODEL="${TECH_AI_MODEL:-$ENV_TECH_AI_MODEL}"
 if [ -z "$FINAL_API_TOKEN" ]; then
     if command -v openssl >/dev/null 2>&1; then
         FINAL_API_TOKEN="$(openssl rand -hex 32)"
@@ -279,6 +290,19 @@ if [ -n "$MISSING" ]; then
     warn "Deretter: bash deploy/install.sh"
 else
     ok "Baade GEMINI_API_KEY og DEEPSEEK_API_KEY er satt"
+fi
+
+if [ -n "$FINAL_TECH_AI" ]; then
+    set_env TECH_AI_API_KEY "$FINAL_TECH_AI"
+    if [ -n "$FINAL_TECH_AI_URL" ]; then
+        set_env TECH_AI_API_URL "$FINAL_TECH_AI_URL"
+    fi
+    if [ -n "$FINAL_TECH_AI_MODEL" ]; then
+        set_env TECH_AI_MODEL "$FINAL_TECH_AI_MODEL"
+    fi
+    ok "TECH_AI_API_KEY satt (Tech-AI monkey)"
+else
+    warn "TECH_AI_API_KEY er tom - Tech-AI er av (valgfritt). Nokkel: https://tech-ai.tech/dashboard/api-keys"
 fi
 
 # Andre/nye nokler som listes i EXTRA_ENV_KEYS skrives rett inn i .env

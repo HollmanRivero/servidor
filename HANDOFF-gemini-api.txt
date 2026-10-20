@@ -1,0 +1,403 @@
+HANDOFF: "API works sometimes / fails sometimes" (Gemini + DeepSeek)
+==============================================================================
+Repo   : /home/hesriverp7/Dokumenter/MyGits/servidor/servidor
+Branch : (uncommitted changes present - see "Working tree" below)
+Date   : 2026-10-20
+Purpose: hand this file to Gemini / Antigravity to continue the fix.
+
+
+0. START HERE - THE RUNNING SERVER IS STALE (do this first)
+------------------------------------------------------------------------------
+THIS IS THE #1 CAUSE OF "SOMETIMES IT WORKS, SOMETIMES IT DOESN'T".
+
+backend/.env was edited at 2026-10-20 06:02, but the server process was
+started at 2026-10-19 08:05 - nearly 22 hours EARLIER:
+
+    PID    STARTED                    CMD
+    73732  Oct 19 08:05:52 2026      .venv/bin/python main.py
+    backend/.env mtime:              Oct 20 06:02:50 2026
+
+main.py reads the .env ONCE at import time (main.py:42, `load_dotenv(..., override=True)`).
+The keys are plain module-level constants (main.py:55, main.py:84). Editing .env
+therefore changes NOTHING until the process is restarted. Your DeepSeek key is
+correct but the live server has never seen it.
+
+Proof - the live server's own health output:
+
+    curl -s http://127.0.0.1:8000/health
+    {
+      ... "gemini_models": ["gemini-3.8-flash","gemini-3-flash-preview",
+                            "gemini-flash-latest","gemini-flash-lite-latest"],
+          "gemini_model_last_ok": "gemini-3-flash-preview",
+          "gemini_key_configured": true,
+          "deepseek_key_configured": false,      <-- WRONG, the key IS in .env now
+          "techai_key_configured": true,
+      ...
+    }
+
+And the live endpoints, called through the API (X-API-Token from .env):
+
+    POST /chat/deepseek  x3  ->  always {"reply":"DeepSeek Feil: DEEPSEEK_API_KEY mangler i backend/.env"}
+
+    POST /chat/gemini    x4  ->  http=200 every time, but the LATENCY is erratic:
+        8.40s   "Hei! Jeg er din AI-assistent ..."
+        40.96s  "Hei! Jeg er klar til å hjelpe deg ..."      <-- 5x slower
+        8.25s   "Hei! Jeg er din Ubuntu-serverassistent ..."
+        6.84s   "Hei! Jeg er din AI-assistent ..."
+
+So the DeepSeek side is 100% broken (stale env) and the Gemini side is 6-41s
+erratic (model 503s + a hanging model, see section 4). Both are fixed by:
+  a) restarting the server, and
+  b) the model-order / timeout fixes in section 7.
+
+Action:
+  1. Restart the service. The process WAS started by systemd
+     (its /proc environ has INVOCATION_ID / SYSTEMD_EXEC_PID), but `systemctl`
+     does not work from this shell ("System has not been booted with systemd as
+     init system") - so run it on the host:
+         sudo systemctl restart servidor-super
+         sudo systemctl status servidor-super
+     or, without systemd:
+         kill 73732
+         cd backend && ../.venv/bin/python main.py
+  2. Re-check: curl -s http://127.0.0.1:8000/health | grep deepseek
+     It must say "deepseek_key_configured": true.
+  3. Re-run POST /chat/deepseek - it must answer, not say "mangler".
+
+Longer term (RC0): either restart after every .env edit (document it in
+deploy/README.md), or add an authenticated POST /admin/reload-config endpoint
+that re-runs load_dotenv + refreshes the module globals. Right now nothing
+tells you the process is stale, which is exactly why this keeps happening.
+
+
+STATUS 2026-10-20 06:55 - FIXES ARE ALREADY APPLIED IN THE WORKING TREE
+------------------------------------------------------------------------------
+The items below were implemented directly in backend/main.py (uncommitted), and
+verified against the live quota-exhausted API. Keep this file as the rationale;
+do not re-apply F1..F6 blindly.
+
+Implemented:
+  F0  Restarted the service (systemd Restart=always) -> /health now reports
+      "deepseek_key_configured": true. Documented the restart requirement in
+      deploy/README.md and backend/.env.example.
+  F1/F2/F3/F4  All rolled into _ask_gemini: per-model cooldown with the real
+      RetryInfo.retryDelay from a 429, no same-model retry on 429/503/404,
+      15s per attempt, 30s total budget, and models on cooldown are skipped
+      instantly.
+  F6  A 401/403 now raises a "Gemini avviser API-nøkkelen" error immediately
+      instead of trying every model and blaming the network.
+  F7  Removed the dead GEMINI_APY_KEY line from backend/.env and normalised
+      "DEEPSEEK_API_KEY=...".
+  F8  _ask_deepseek detects an empty content field (reasoning tokens ate the
+      whole max_tokens) and retries once with a doubled budget.
+  New: /health exposes "gemini_model_cooldowns" so you can see which models are
+      benched and for how long.
+
+Measured on the live server after the change:
+  /chat/gemini   5/5 + 6/6 OK, 0.73 - 0.97s each   (was 6.8s / 8.2s / 41s / 8.4s)
+  /chat/deepseek 3/3 OK, ~1.1s                     (was "DEEPSEEK_API_KEY mangler" 3/3)
+  json_mode      OK, returned valid JSON via the lite model
+  fallback       forced a Gemini failure -> answer came from DeepSeek
+
+NOT implemented (deliberately):
+  F5  thinkingConfig was rejected by gemini-flash-lite-latest with
+      HTTP 400 INVALID_ARGUMENT (thinkingBudget: 0 is not accepted there),
+      and the model that actually answers does not think, so it bought nothing.
+      Do not add it without per-model support detection.
+  RC8 config.py / main.py duplication is still there. Any new setting must be
+      added in BOTH places.
+
+What is LEFT for you, and no code change can fix it:
+  The Gemini free tier is 20 requests per DAY per model. With four models that
+  is ~80 requests/day in total, and today's quota is already gone for three of
+  them (see /health -> gemini_model_cooldowns, ~2h until reset). The server now
+  degrades gracefully and falls back to DeepSeek, but if you want Gemini back
+  for real you need billing enabled on the key or a fresh project/key.
+  The currently healthy model is gemini-flash-lite-latest.
+
+
+1. WHAT I DID
+------------------------------------------------------------------------------
+Read-only diagnosis only. NO code files were modified, NOTHING was committed,
+no service was restarted (systemd is not PID 1 in this environment, so
+`systemctl restart servidor-super` cannot be used here - test the server by
+running `cd backend && ../.venv/bin/python main.py` with PORT/HOST env vars).
+
+What was exercised:
+  - Read backend/.env (values redacted in output; see "Secrets" below).
+  - Read backend/main.py, backend/config.py, backend/agent.py,
+    backend/test_api.py, backend/scheduler.py.
+  - Ran `backend/test_api.py` (DeepSeek smoke test).
+  - Live probes against api.deepseek.com and
+    generativelanguage.googleapis.com (sequential, concurrent, JSON-mode,
+    multi-model).
+  - Queried the local error log with `backend/check_errors.py --all`.
+  - Started the backend once on 127.0.0.1:8123 to check routes; process is
+    gone, nothing is listening on 8123 anymore. No stray processes left.
+
+So: nothing in the repo depends on this session. You can start from scratch.
+
+
+2. WORKING TREE (10 pending changes, none mine)
+------------------------------------------------------------------------------
+  M README.md
+  M backend/.env.example
+  M backend/config.py
+  M backend/main.py
+  M backend/test_api.py
+  M deploy/README.md
+  M deploy/config.local.example
+  M deploy/install.sh
+  M mobile/gradle/wrapper/gradle-wrapper.properties
+  ?? backend/.agent_state.json        (untracked runtime state, should probably be gitignored)
+
+`backend/.env` is correctly gitignored and NOT tracked. Good.
+
+
+3. THE ARGUMENT WAS "GEMINI API", SO THAT IS THE FLAKY ONE
+------------------------------------------------------------------------------
+DeepSeek is currently HEALTHY. Gemini is the one that fails intermittently,
+and the reason is model availability + timeouts, not the key.
+
+
+4. EVIDENCE: GEMINI (measured live, 2026-10-20)
+------------------------------------------------------------------------------
+Models configured in backend/.env:
+    GEMINI_MODELS=gemini-3.8-flash,gemini-3-flash-preview,gemini-flash-latest,gemini-flash-lite-latest
+
+All four names DO exist in the API model list (verified via /v1beta/models).
+
+One call per model, payload identical to what main.py sends
+(contents + generationConfig{temperature:0.5, maxOutputTokens:8192}):
+
+    gemini-3.8-flash           -> HTTP 503  6.4s
+                                  "This model is currently experiencing high demand."
+    gemini-3-flash-preview     -> OK 1.1s  out=2 tokens, thoughts=94  text='Hei!'
+    gemini-flash-latest        -> TimeoutError after 45.1s (read timed out)
+    gemini-flash-lite-latest   -> OK 0.7s  out=2 tokens, thoughts=None  text='Hei!'
+
+That is exactly the "sometimes it works, sometimes it doesn't" symptom:
+  - the FIRST model in the list is the one that is overloaded (503),
+  - the THIRD model hangs until timeout,
+  - the key is fine.
+
+Confirmation from PRODUCTION (the live server on port 8000): /health reports
+    "gemini_model_last_ok": "gemini-3-flash-preview"
+i.e. in real traffic gemini-3.8-flash (first in the list) is failing and the
+second model is doing all the work. That is RC1 observed in the wild.
+
+Key validity (important, because of the old 401 in the error log):
+  - `?key=<key>`                    -> 200 OK
+  - `x-goog-api-key: <key>`         -> 200 OK
+  - `Authorization: Bearer <key>`   -> 401 UNAUTHENTICATED
+                                       "ACCESS_TOKEN_TYPE_UNSUPPORTED"
+The historical 06:04 2026-10-19 error in the DB is that Bearer-style rejection.
+The key VALUE is fine; it must only ever be sent as a query param / x-goog-api-key.
+The key format is `AQ.Ab8...` (53 chars), not the classic `AIza...`. It still
+works, but do not assume any tooling that expects `AIza` will accept it.
+
+
+5. EVIDENCE: DEEPSEEK (the key you just replaced - it works now)
+------------------------------------------------------------------------------
+  - GET https://api.deepseek.com/models with the new key returns:
+        ['deepseek-flash', 'deepseek-v4-pro']
+  - 8 sequential chat calls  : 8 OK, 0 failed (~1.1s each)
+  - 6 concurrent calls       : 6 OK, 0 failed (no 429s)
+  - JSON mode payload exactly as main.py builds it (response_format json_object)
+    : OK 2.0s, returns valid JSON
+  - The old failure in the error log was:
+        HTTP 401 "Your api key: ****f909 is invalid"   <-- previous key, now fixed
+
+Two DeepSeek behaviours worth knowing before changing anything:
+  a) `deepseek-flash` is a REASONING model. `reasoning_tokens` are billed
+     against `max_tokens`. With max_tokens=20 the entire budget was eaten by
+     thinking and the response was:
+         finish_reason = "length", content = '' (empty), reasoning_tokens = 20
+     With max_tokens=4096 there is plenty of headroom, so it works today.
+     If anyone lowers max_tokens, replies silently become EMPTY.
+  b) With an agent-flavoured system prompt and no `tools` parameter,
+     deepseek-flash returns its tool-call markup as plain text content:
+         <|DSML| calls> <|DSML| invoke name="bash"> ...
+     `_ask_deepseek()` in main.py:819 sends NO tools, so this markup can leak
+     into normal chat replies. Mitigated only by the system prompt wording.
+
+
+6. ROOT CAUSES IN CODE (ranked by impact)
+------------------------------------------------------------------------------
+All references are to backend/main.py.
+
+RC0 (biggest, and not a code bug) - the running process predates the .env
+    edit, so the new DeepSeek key was never loaded. See section 0.
+    main.py:42   load_dotenv(BASE_DIR / ".env", override=True)   <-- runs once
+    main.py:55   DEEPSEEK_API_KEY = os.environ.get(...)          <-- frozen
+    main.py:84   DEEPSEEK_MODEL   = os.environ.get(...)          <-- frozen
+
+RC1 (main cause) - the model list is ordered by "newest first", and the newest
+model is the one that is overloaded.
+    main.py:86  GEMINI_MODELS order starts with gemini-3.8-flash
+    main.py:757 for model in _gemini_model_order(): ...
+    gemini-3.8-flash returns 503 as measured above, so every request pays a
+    ~6-7s failure before reaching a model that works.
+
+RC2 - `gemini-flash-latest` hangs and eats the full timeout.
+    main.py:765  _post_json(url, payload, timeout=35)
+    Measured: >45s without answering. A hang is not an HTTPError, so it falls
+    into `except Exception` (main.py:789) and moves to the next model - correct
+    behaviour, but it costs the full 35s each time it is reached. If the models
+    before it also fail, one user question can take 60-90s and the client shows
+    it as "the API is not working".
+
+RC3 - 503/429 is retried on the SAME model before moving on.
+    main.py:81   TRANSIENT_RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+    main.py:782  if e.code in TRANSIENT_RETRY_STATUS and attempt == 0:
+    main.py:784  time.sleep(1.2)  -> retries the overloaded model
+    For a "high demand" 503 a retry of the same model has no value; the next
+    model is strictly better. This adds ~7s and usually fails again.
+
+RC4 - `_gemini_last_good` pins a model that may have become overloaded.
+    main.py:77   _gemini_last_good
+    main.py:729  _gemini_model_order(): puts _gemini_last_good FIRST
+    The "sticky good model" is never invalidated. Once a model is overloaded,
+    every new request starts by failing on it. Also the `"lite" not in
+    _gemini_last_good` check is a plain substring match - fragile and
+    undocumented.
+
+RC5 - Gemini 3 thinking models run unbounded.
+    main.py:744  generationConfig = {"temperature": ..., "maxOutputTokens": 8192}
+    No `thinkingConfig.thinkingBudget` is set. `thoughtsTokenCount` was already
+    94 for a one-word prompt. On real prompts this inflates latency and feeds
+    RC2's timeouts. Setting a thinking budget (or 0 for chat) is the cheapest
+    latency win.
+
+RC6 - the user-facing error is misleading when the key is wrong.
+    main.py:816  raise RuntimeError("Ingen Gemini-modell svarte. " + problems)
+    A 401/403 on every model is reported as "no model answered", which sends
+    you looking for a network problem instead of a key problem. The 401 above
+    ("ACCESS_TOKEN_TYPE_UNSUPPORTED") proves how confusing this gets.
+
+RC7 (housekeeping) - backend/.env contains a duplicate typo entry:
+    GEMINI_API_KEY=...       <-- used by the code
+    GEMINI_APY_KEY=...       <-- typo, never read by anything
+    Delete the typo, otherwise someone will "update the key" in the wrong line
+    and be back to intermittent 401s. This is very likely what happened before.
+
+RC8 (housekeeping) - settings are defined twice and can drift:
+    backend/config.py:19,35 and backend/main.py:55,84 each read
+    DEEPSEEK_API_KEY / DEEPSEEK_MODEL / TECH_AI_* independently. Today they
+    agree, but they are two sources of truth. main.py also loads .env with
+    `override=True` (main.py:42) while config.py does not (config.py:12), so a
+    variable already exported in the shell is silently replaced in one of them
+    and not the other.
+
+
+7. SUGGESTED FIXES (F0, F1, F2, F3, F4, F6, F7, F8 are APPLIED - see STATUS above)
+------------------------------------------------------------------------------
+F0  FIRST, AND ONLY NECESSARY FIX FOR DEEPSEEK: restart the server so it reads
+    the current backend/.env (see section 0). Verify /health shows
+    "deepseek_key_configured": true. Nothing else is wrong with DeepSeek.
+    Then document in deploy/README.md that .env edits need a restart.
+
+F1  Reorder the default list so an overloaded "newest" model is not first,
+    e.g. put gemini-3-flash-preview (measured healthy, 1.1s) ahead of
+    gemini-3.8-flash. Keep the 503-prone one as a later candidate.
+    -> main.py:86 (and backend/.env.example, backend/.env)
+
+F2  On 503 (and 429) do NOT retry the same model; move to the next one
+    immediately. Keep the same-model retry only for 408/500/502/504 and
+    network timeouts.
+    -> main.py:81 (split the set) and main.py:782
+
+F3  Give _ask_gemini an overall deadline (e.g. 25-30s total) and a shorter
+    per-attempt timeout (e.g. 12-15s), then fail over to DeepSeek. That turns
+    a 90s hang into a fast answer from a working provider.
+    -> main.py:757..795, main.py:938-947
+
+F4  Add a short-lived cooldown for models that just returned 503/404, instead
+    of only pinning the last good one. A dict {model: monotonic_deadline} is
+    enough. This directly kills the "sticky overloaded model" effect (RC4).
+    -> main.py:77, main.py:729
+
+F5  Set a thinking budget for chat calls, e.g.
+        generationConfig["thinkingConfig"] = {"thinkingBudget": 0}
+    for fast chat, or a small budget (e.g. 512) for the agent paths. Expect a
+    large latency drop. Note: the code already has a defensive path that
+    retries without responseMimeType on HTTP 400 (main.py:771); extend that
+    same pattern so an unsupported thinkingConfig is dropped instead of failing
+    the request.
+    -> main.py:744-749
+
+F6  Separate "auth error" from "provider busy" in the message the user sees.
+    If every model returns 401/403, say the key is invalid.
+    -> main.py:816, main.py:938-947
+
+F7  Remove the GEMINI_APY_KEY typo from backend/.env, and (optionally) make
+    config.py the single place that reads env vars, with main.py importing
+    from it (RC8).
+
+F8  Consider adding `tools=[]` or a guard in _ask_deepseek so the <|DSML|>
+    markup from deepseek-flash does not reach the chat UI (see 5b).
+
+
+8. HOW TO VERIFY AFTER A FIX
+------------------------------------------------------------------------------
+Run a per-model timing probe (this is what produced section 4), then confirm
+the whole endpoint:
+
+  a) Per-model probe - for each model in GEMINI_MODELS, POST
+     .../v1beta/models/<model>:generateContent?key=<key> with
+     {"contents":[{"parts":[{"text":"Svar kun med ett ord: Hei!"}]}],
+      "generationConfig":{"temperature":0.5,"maxOutputTokens":8192}}
+     Expected after F1..F5: first model either answers in <5s or the request
+     moves on in <2s; no single model costs >15s.
+
+  b) Endpoint probe:
+        cd backend && PORT=8123 HOST=127.0.0.1 ../.venv/bin/python main.py
+        curl -s -X POST http://127.0.0.1:8123/chat/gemini \
+             -H 'Content-Type: application/json' \
+             -H "X-API-Token: $API_TOKEN" \
+             -d '{"message":"Si hei på norsk"}'
+     Run it 10x in a loop; every reply must come back in a few seconds and
+     none may say "Gemini Feil".
+
+  c) Error log (after the run):
+        cd backend && ../.venv/bin/python check_errors.py --all
+     There are 5 old entries in there; 3 of them are the stale
+     "DEEPSEEK_API_KEY mangler" / 401-from-old-key noise from 2026-10-19 and
+     can be cleared with `check_errors.py --resolve-all` once the fix is in.
+
+  d) Do NOT debug by restarting systemd here; it is not available in this
+     environment. Always launch main.py directly with PORT/HOST set.
+
+
+9. SECRETS / HOUSEKEEPING - PLEASE READ
+------------------------------------------------------------------------------
+  - backend/.env is gitignored and untracked. Good. Keep it that way.
+  - The DeepSeek key and the `GEMINI_APY_KEY` line were displayed in plain
+    text during this session's diagnostics. If that transcript is shared
+    outside your machine, rotate BOTH keys:
+        DeepSeek : https://platform.deepseek.com/api_keys
+        Gemini   : https://aistudio.google.com/apikey
+  - .env formatting is inconsistent: `DEEPSEEK_API_KEY = sk-...` has spaces
+    around the `=` while other lines do not. python-dotenv tolerates it today,
+    but normalise it to `KEY=value`.
+  - `_ask_gemini` puts the API key in the URL query string
+    (main.py:758-761). That is how Google requires it for this endpoint, but
+    the URL can end up in proxy/access logs. `x-goog-api-key` also works
+    (verified above) and keeps the key out of the URL - prefer it.
+  - backend/.agent_state.json is untracked runtime state; add it to
+    .gitignore unless it is meant to be committed.
+
+
+10. OPEN QUESTIONS FOR WHOEVER PICKS THIS UP
+------------------------------------------------------------------------------
+  Q1 Which model should be the preferred default? Only gemini-3-flash-preview
+     and gemini-flash-lite-latest were reliably fast in today's measurements.
+     gemini-3.8-flash was 503 and gemini-flash-latest timed out.
+  Q2 Is the long think-time a feature you want (better answers) or a bug
+     (slow answers)? That decides the thinkingBudget value in F5.
+  Q3 Should /chat/gemini keep its implicit DeepSeek fallback, or should the
+     UI show which provider answered? Today the fallback text is prepended to
+     the reply ("(Svar via DeepSeek-fallback ...)"), which mixes providers in
+     the same conversation.
+  Q4 Is someone else's install reading backend/.env.example? If so, keep the
+     default model order in sync there too (it currently matches main.py).
