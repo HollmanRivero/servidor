@@ -259,10 +259,20 @@ fun DashboardScreen(
                                     label = { Text("X-API-Token") },
                                     singleLine = true
                                 )
+                                errorMessage?.let { msg ->
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(msg, color = Color(0xFFFF5252))
+                                }
                             }
                         },
                         confirmButton = {
                             Button(onClick = {
+                                val urlError = RetrofitClient.validateBaseUrl(tempIp)
+                                if (urlError != null) {
+                                    errorMessage = urlError
+                                    return@Button
+                                }
+                                errorMessage = null
                                 RetrofitClient.BASE_URL = tempIp
                                 RetrofitClient.API_TOKEN = tempToken
                                 prefs.edit()

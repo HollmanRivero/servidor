@@ -261,6 +261,38 @@ object RetrofitClient {
         return u
     }
 
+    /** Returnerer null hvis adressen er brukbar, ellers en feilmelding til brukeren.
+     * Uten denne godtas en skrivefeil som "100.1115.248.101" og appen venter
+     * 30 sekunder på en vert som ikke kan finnes. */
+    fun validateBaseUrl(raw: String): String? {
+        val u = raw.trim()
+        if (u.isEmpty()) return "Skriv inn serveradressen, f.eks. http://100.x.y.z:8000"
+
+        val withoutScheme = u.removePrefix("https://").removePrefix("http://")
+        val authority = withoutScheme.substringBefore('/').substringBefore('?')
+        if (authority.isEmpty()) return "Mangler vertsnavn"
+
+        val host = authority.substringBeforeLast(':', authority)
+        val portText = if (authority.contains(':')) authority.substringAfterLast(':') else ""
+        if (portText.isNotEmpty()) {
+            val port = portText.toIntOrNull() ?: return "Ugyldig port: $portText"
+            if (port !in 1..65535) return "Ugyldig port: $port"
+        }
+        if (host.isEmpty()) return "Mangler vertsnavn"
+
+        if (host.all { it.isDigit() || it == '.' }) {
+            val parts = host.split(".")
+            if (parts.size != 4) return "Ugyldig IP-adresse: $host"
+            for (part in parts) {
+                val n = part.toIntOrNull() ?: return "Ugyldig IP-adresse: $host"
+                if (n !in 0..255) return "Ugyldig IP-adresse: $host (hver del må være 0-255)"
+            }
+        } else if (!host.matches(Regex("[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*"))) {
+            return "Ugyldig vertsnavn: $host"
+        }
+        return null
+    }
+
     private var _baseUrl = "http://100.115.248.101:8000/"
     var BASE_URL: String
         get() = _baseUrl

@@ -174,7 +174,7 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
             title = { Text("Konfigurer server") },
             text = {
                 Column {
-                    Text("URL til serveren (f.eks. http://100.115.248.101:8000)")
+                    Text("URL til serveren (f.eks. http://100.x.y.z:8000)")
                     Spacer(modifier = Modifier.height(8.dp))
                     TextField(
                         value = tempIp,
@@ -191,10 +191,20 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                         label = { Text("X-API-Token") },
                         singleLine = true
                     )
+                    error?.let { msg ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(msg, color = Color(0xFFFF5252))
+                    }
                 }
             },
             confirmButton = {
                 Button(onClick = {
+                    val urlError = RetrofitClient.validateBaseUrl(tempIp)
+                    if (urlError != null) {
+                        error = urlError
+                        return@Button
+                    }
+                    error = null
                     RetrofitClient.BASE_URL = tempIp
                     RetrofitClient.API_TOKEN = tempToken
                     prefs.edit()
