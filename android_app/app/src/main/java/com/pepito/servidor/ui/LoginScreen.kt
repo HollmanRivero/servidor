@@ -77,7 +77,9 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                 onLoggedIn()
             } catch (e: HttpException) {
                 error = when (e.code()) {
-                    401 -> "Feil brukernavn eller passord"
+                    401 -> "Feil brukernavn eller passord. Brukernavnet må skrives " +
+                        "nøyaktig som det ble laget (f.eks. «Hollman Rivero» med mellomrom). " +
+                        "Glemt passord? Trykk «Glemt passord?» under."
                     403 -> "Kontoen er bannet"
                     409 -> "Brukernavnet er allerede i bruk"
                     else -> "Serveren svarte med feil ${e.code()}"

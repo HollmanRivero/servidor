@@ -2143,8 +2143,9 @@ def auth_forgot_password(body: ForgotPasswordRequest, request: Request):
         logger.warning("Passordtilbakestilling forespurt for '{}' fra {}", user["username"], client_ip)
     return {
         "message": (
-            "Spør administratoren om en engangskode. "
-            "På serveren kjører han: python reset_password.py --user <brukernavn>"
+            "Engangskoden lages på serveren av administratoren. Kjør fra repo-roten:\n"
+            ".venv/bin/python backend/reset_password.py --user \"<brukernavn>\"\n"
+            "Du får 6 siffer som er gyldige i 30 minutter."
         )
     }
 

@@ -361,6 +361,36 @@ curl -s -X POST localhost:8000/auth/register \
 | `deepseek_key_configured: false` selv om nøkkelen ligger i `.env` | Tjenesten startet før `.env` ble endret. `sudo systemctl restart servidor-super` |
 | Alt feiler etter en kodeendring | `journalctl -u servidor-super -n 40` |
 
+## Kommandoer (Python-filer i backend/)
+
+Alle kjøres fra **repo-roten** med prosjektets `.venv` — ikke `sudo`, ikke
+`python3`. Bruk `.venv/bin/python backend/<fil>.py`, så slipper du
+`RuntimeWarning` fra `..` i stien.
+
+| fil | hva den gjør | eksempel |
+|---|---|---|
+| `backend/main.py` | selve serveren (startes normalt av systemd) | `sudo systemctl restart servidor-super` |
+| `backend/reset_password.py` | lager engangskode, setter passord, søker i brukere | `.venv/bin/python backend/reset_password.py --user "Hollman Rivero"` |
+| `backend/check_db.py` | sjekker at databasen svarer og viser innhold | `.venv/bin/python backend/check_db.py` |
+| `backend/check_errors.py` | viser feilloggen, kan markere alt som løst | `.venv/bin/python backend/check_errors.py --all` |
+| `backend/test_api.py` | liten røyktest mot DeepSeek-nøkkelen | `.venv/bin/python backend/test_api.py` |
+
+`reset_password.py` i detalj:
+
+```bash
+.venv/bin/python backend/reset_password.py --list                      # alle brukere
+.venv/bin/python backend/reset_password.py --find kari                 # søk
+.venv/bin/python backend/reset_password.py --user "Hollman Rivero"     # engangskode (6 siffer, 30 min)
+.venv/bin/python backend/reset_password.py --user "Hollman Rivero" --set-passord "nytt-passord"
+```
+
+De andre filene i `backend/` (`auth.py`, `database.py`, `agent.py`, `tools.py`,
+`memory.py`, `config.py`, `scheduler.py`) er moduler som serveren importerer —
+du kjører dem ikke direkte.
+
+SQL-kommandoer (admin, ban, VIP, brukere) ligger i
+[`backend/admin_queries.sql`](../backend/admin_queries.sql).
+
 ## Daglig bruk
 
 ```bash
