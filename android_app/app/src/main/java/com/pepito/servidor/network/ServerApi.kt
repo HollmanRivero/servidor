@@ -116,6 +116,7 @@ data class AgentTaskResponse(
     val done: Boolean = false,
     val summary: String = "",
     val steps: List<AgentStepLog> = emptyList(),
+    val pending_messages: List<String> = emptyList(),
     val review: ReviewResult? = null
 )
 
@@ -138,6 +139,16 @@ data class LoginResponse(
     val user: UserInfo? = null,
     val access: String = "",
     val reason: String = ""
+)
+
+data class AgentMessageRequest(
+    val message: String
+)
+
+data class AgentMessageResponse(
+    val queued: Int = 0,
+    val running: Boolean = false,
+    val note: String = ""
 )
 
 data class ForgotPasswordRequest(
@@ -255,6 +266,9 @@ interface ServerApiService {
     @POST("auth/register")
     suspend fun register(@Body request: RegisterRequest): RegisterResponse
 
+    @POST("chat/agent/message")
+    suspend fun queueAgentMessage(@Body request: AgentMessageRequest): AgentMessageResponse
+
     @POST("auth/forgot-password")
     suspend fun forgotPassword(@Body request: ForgotPasswordRequest): MessageResponse
 
@@ -317,7 +331,7 @@ object RetrofitClient {
     }
 
     // Ingen hardkodet serveradresse: lastes fra server_prefs eller settes paa login-skjermen.
-    private var _baseUrl = ""
+    private var _baseUrl = "http://100.115.248.101:8000"
     var BASE_URL: String
         get() = _baseUrl
         set(value) {

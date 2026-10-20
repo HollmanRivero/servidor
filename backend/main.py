@@ -188,6 +188,22 @@ OPEN_PATHS = {
 TAILSCALE_AUTH_KEY = os.environ.get("TAILSCALE_AUTH_KEY", "").strip()
 AUTO_CONNECT_TAILSCALE = os.environ.get("AUTO_CONNECT_TAILSCALE", "1").strip().lower() in {"1", "true", "yes", "on"}
 
+# Meldinger brukeren skriver MENS agenten jobber. Agenten tommer denne lista i
+# starten av hvert steg og vurderer oppgaven pa nytt, slik at en korreksjon
+# ("nei, jeg mente...") blir tatt hensyn til i stedet for a bli ignorert.
+_agent_inbox: list[str] = []
+_agent_inbox_lock = threading.Lock()
+
+
+def _drain_agent_inbox() -> list[str]:
+    with _agent_inbox_lock:
+        if not _agent_inbox:
+            return []
+        items = list(_agent_inbox)
+        _agent_inbox.clear()
+        return items
+
+
 # Sanntidsstatus for kjørende agent-oppgave (slik at klienten alltid kan hente status)
 _agent_lock = threading.Lock()
 _agent_state: dict = {
@@ -1622,6 +1638,34 @@ def chat_agent_status():
     return _agent_state
 
 
+class AgentMessageRequest(BaseModel):
+    message: str
+
+
+@app.post("/chat/agent/message")
+def chat_agent_message(body: AgentMessageRequest):
+    """Legger en melding i ko til en agent som jobber. Agenten leser den i
+    starten av neste steg og vurderer situasjonen pa nytt."""
+    text = (body.message or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Meldingen er tom")
+    if not _agent_state.get("running"):
+        return {
+            "queued": 0,
+            "running": False,
+            "note": "Agenten kjorer ikke na. Send meldingen som en vanlig oppgave i stedet.",
+        }
+    with _agent_inbox_lock:
+        _agent_inbox.append(text)
+        queued = len(_agent_inbox)
+    logger.info("Melding fra bruker lagt i ko ({} tegn, {} i ko)", len(text), queued)
+    return {
+        "queued": queued,
+        "running": True,
+        "note": "Agenten leser meldingen naar dette steget er ferdig.",
+    }
+
+
 @app.post("/chat/agent")
 def chat_agent(body: AgentTaskRequest):
     """Autonom kodeagent som jobber steg-for-steg helt til oppgaven er ferdigstilt."""
@@ -1653,6 +1697,9 @@ def chat_agent(body: AgentTaskRequest):
     if init_warn:
         history_notes.append(init_warn)
 
+    with _agent_inbox_lock:
+        _agent_inbox.clear()
+
     with _agent_lock:
         _agent_state.update({
             "running": True,
@@ -1664,6 +1711,7 @@ def chat_agent(body: AgentTaskRequest):
             "done": False,
             "summary": "Agenten jobber...",
             "steps": steps_log,
+            "user_messages": int(_agent_state.get("user_messages", 0)),
             "started_at": time.time(),
             "updated_at": time.time(),
         })
@@ -1678,6 +1726,25 @@ def chat_agent(body: AgentTaskRequest):
     try:
         for step_num in range(1, max_steps + 1):
             tree_now = _project_tree_snapshot(workdir)
+
+            # Har brukeren skrevet noe mens vi jobbet? Da er det viktigere enn
+            # historikken, og agenten skal vurdere om planen maa justeres.
+            user_updates = _drain_agent_inbox()
+            if user_updates:
+                history_notes.append("NY MELDING FRA BRUKEREN UNDERVEIS: " + " / ".join(user_updates))
+                with _agent_lock:
+                    _agent_state["user_messages"] = int(_agent_state.get("user_messages", 0)) + len(user_updates)
+                    _agent_state["updated_at"] = time.time()
+
+            user_updates_block = ""
+            if user_updates:
+                user_updates_block = (
+                    "VIKTIG - NYE MELDINGER FRA BRUKEREN MENS DU JOBBET:\n"
+                    + "\n".join(f"- {u}" for u in user_updates)
+                    + "\nVurder om dette endrer oppgaven. Har brukeren rettet seg selv eller "
+                    "ombestemt seg, juster planen - eller avslutt med done=true og forklar hvorfor.\n\n"
+                )
+
             recent_history = "\n\n".join(history_notes[-10:]) if history_notes else "(ingen steg utført ennå)"
 
             prompt = (
@@ -1687,6 +1754,7 @@ def chat_agent(body: AgentTaskRequest):
                 f"FILER I ARBEIDSMAPPEN NÅ:\n{tree_now}\n\n"
                 f"BRUKERENS MÅL:\n{goal}\n\n"
                 f"HISTORIKK FRA TIDLIGERE STEG:\n{recent_history}\n\n"
+                f"{user_updates_block}"
                 f"Dette er steg {step_num} av {max_steps}. "
                 "Velg neste handling som bringer oppgaven i mål, og svar KUN med gyldig JSON:"
             )
@@ -1752,6 +1820,25 @@ def chat_agent(body: AgentTaskRequest):
             }
 
             if action == "finish" or (wants_done and action not in all_file_actions):
+                # Brukeren kan ha skrevet noe mens vi jobbet. Da skal vi IKKE
+                # avslutte: les meldingen, vurder situasjonen og fortsett hvis
+                # den betyr at noe skal gjøres annerledes.
+                late_messages = _drain_agent_inbox()
+                if late_messages:
+                    with _agent_lock:
+                        _agent_state["user_messages"] = int(_agent_state.get("user_messages", 0)) + len(late_messages)
+                    late_txt = " / ".join(late_messages)
+                    msg = (
+                        "Finish avvist: brukeren sendte en melding mens du jobbet: "
+                        f"«{late_txt}». Les den, vurder om oppgaven skal justeres, og fortsett."
+                    )
+                    step_entry["action"] = "continue"
+                    step_entry["result"] = msg
+                    step_entry["ok"] = False
+                    steps_log.append(step_entry)
+                    history_notes.append(f"Steg {step_num}: {msg}")
+                    continue
+
                 if last_step_failed and step_num < max_steps - 1:
                     msg = (
                         "Avvist finish: Forrige steg feilet. Rett opp feilen og verifiser at alt "
@@ -1993,6 +2080,7 @@ def chat_agent(body: AgentTaskRequest):
                 _agent_state.update({
                     "current_step": step_num,
                     "steps": steps_log,
+                    "user_messages": int(_agent_state.get("user_messages", 0)),
                     "updated_at": time.time(),
                 })
                 _save_agent_state()
@@ -2045,9 +2133,21 @@ def chat_agent(body: AgentTaskRequest):
                 "done": done,
                 "summary": summary,
                 "steps": steps_log,
+                "user_messages": int(_agent_state.get("user_messages", 0)),
                 "updated_at": time.time(),
             })
             _save_agent_state()
+
+        # Meldinger som kom for sent til a bli lest i et steg skal ikke forsvinne
+        # i stillhet - de returneres sammen med svaret.
+        leftover = _drain_agent_inbox()
+        pending_note = ""
+        if leftover:
+            pending_note = (
+                " Du sendte også en melding helt til slutt som jeg ikke rakk å behandle: "
+                + " / ".join(leftover)
+            )
+            summary = (summary or "") + pending_note
 
         return {
             "goal": goal,
@@ -2058,6 +2158,8 @@ def chat_agent(body: AgentTaskRequest):
             "summary": summary,
             "answer": summary,
             "steps": steps_log,
+            "user_messages": int(_agent_state.get("user_messages", 0)),
+            "pending_messages": leftover,
             "review": review_obj,
         }
     except Exception as exc:
@@ -2079,6 +2181,7 @@ def chat_agent(body: AgentTaskRequest):
             "summary": f"Agenten møtte en feil underveis ({exc}), men har lagret {len(steps_log)} steg.",
             "answer": f"Agenten møtte en feil underveis ({exc}), men har lagret {len(steps_log)} steg.",
             "steps": steps_log,
+            "user_messages": int(_agent_state.get("user_messages", 0)),
             "review": None,
         }
 

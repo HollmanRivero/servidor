@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.pepito.servidor.network.AgentMessageRequest
 import com.pepito.servidor.network.AgentTaskRequest
 import com.pepito.servidor.network.ChatRequest
 import com.pepito.servidor.network.CollaborateRequest
@@ -63,8 +64,34 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
         refreshProjects()
     }
 
+    // Agenten jobber: legg meldingen i ko slik at den leses i neste steg og
+    // situasjonen vurderes paa nytt (brukeren kan ha sagt feil).
+    fun queueMessage(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        inputText = ""
+        messages = messages + ChatMessage(t, true)
+        scope.launch {
+            try {
+                val r = RetrofitClient.api.queueAgentMessage(AgentMessageRequest(t))
+                val note = when {
+                    r.running -> "📨 Lagt i kø (${r.queued}). Agenten leser den når dette steget er ferdig."
+                    r.note.isNotBlank() -> r.note
+                    else -> "Agenten kjører ikke nå – send som vanlig melding."
+                }
+                messages = messages + ChatMessage(note, false, "kø")
+            } catch (e: Exception) {
+                messages = messages + ChatMessage("Kunne ikke sende meldingen: ${e.message}", false, "kø")
+            }
+        }
+    }
+
     fun sendMessage(text: String) {
-        if (text.isBlank() || isTyping) return
+        if (text.isBlank()) return
+        if (isTyping) {
+            if (agentMode) queueMessage(text)
+            return
+        }
         val userText = text
         messages = messages + ChatMessage(userText, true)
         inputText = ""
@@ -140,6 +167,22 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                             if (result.steps.any { it.action == "delete_path" && (it.target == "." || it.target == currentProject) && it.ok }) {
                                 projectName = "servidor"
                                 currentProject = "servidor"
+                            }
+                            // Brukeren skrev noe mens agenten jobbet, men den rakk
+                            // a bli ferdig forst. Da tar vi meldingen som neste
+                            // oppgave i stedet for a miste den.
+                            val pending = result.pending_messages
+                            if (pending.isNotEmpty()) {
+                                messages = messages + ChatMessage(
+                                    "📨 Meldingen din kom etter at agenten var ferdig. " +
+                                        "Den tar den som neste oppgave:\n" + pending.joinToString("\n"),
+                                    false,
+                                    "kø"
+                                )
+                                currentGoal = pending.joinToString("\n")
+                                round++
+                                if (round <= maxRounds) continue
+                                break
                             }
                             if (result.done) break
                             round++
@@ -382,7 +425,9 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                     modifier = Modifier.weight(1f),
                     placeholder = {
                         Text(
-                            if (agentMode)
+                            if (agentMode && isTyping)
+                                "Agenten jobber – skriv en tilleggsmelding (leses etter dette steget)..."
+                            else if (agentMode)
                                 "Be $selectedAI-agenten endre filer/mapper eller kjøre kommandoer i '$projectName'..."
                             else
                                 "Spør $selectedAI..."
@@ -396,9 +441,15 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 IconButton(
-                    onClick = { sendMessage(inputText) },
+                    onClick = {
+                        if (isTyping && agentMode) queueMessage(inputText) else sendMessage(inputText)
+                    },
                     modifier = Modifier
-                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(50))
+                        .background(
+                            if (isTyping && !agentMode) Color.Gray
+                            else MaterialTheme.colorScheme.primary,
+                            RoundedCornerShape(50)
+                        )
                 ) {
                     Icon(Icons.Default.Send, contentDescription = "Send", tint = Color.White)
                 }
