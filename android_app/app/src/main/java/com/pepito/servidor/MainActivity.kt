@@ -44,7 +44,10 @@ fun ServidorApp() {
     val navController = rememberNavController()
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("server_prefs", Context.MODE_PRIVATE) }
-    val startDestination = if (prefs.getString("auth_token", null) != null) "dashboard" else "login"
+    // Dashbord krever BAAADE innlogging og en lagret serveradresse - ellers starter vi paa login.
+    val harToken = !prefs.getString("auth_token", null).isNullOrBlank()
+    val harServer = !prefs.getString("server_ip", null).isNullOrBlank()
+    val startDestination = if (harToken && harServer) "dashboard" else "login"
 
     NavHost(navController = navController, startDestination = startDestination) {
         composable("login") {

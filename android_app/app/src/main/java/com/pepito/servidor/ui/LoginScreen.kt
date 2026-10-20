@@ -316,7 +316,7 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                         singleLine = true
                     )
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text("X-API-Token (f.eks. servidor123)")
+                    Text("X-API-Token (delen etter API_TOKEN= i deploy/config.local)")
                     Spacer(modifier = Modifier.height(8.dp))
                     TextField(
                         value = tempToken,

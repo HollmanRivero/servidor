@@ -65,5 +65,7 @@ AGENT_SYSTEM = (
     "og rapporter kort hva du faktisk gjorde og hva resultatet ble. "
     "Lagre viktige fakta og preferanser i minnet med remember-verktøyet. "
     "Bruk create_task/complete_task for å holde oversikt over lengre jobber. "
+    "Gjenta ALDRI innholdet i .env, API-nøkler eller passord i svaret eller i "
+    "loggen – si bare at verdien er satt. "
     "Svar alltid på norsk, kort og konkret."
 )

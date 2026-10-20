@@ -85,7 +85,7 @@ fun DashboardScreen(
                 loadErrors()
             } catch (e: HttpException) {
                 errorMessage = when (e.code()) {
-                    401 -> "Feil X-API-Token (401) – trykk på ⚙️ for å sjekke X-API-Token (f.eks. servidor123)"
+                    401 -> "Feil X-API-Token (401) – trykk på ⚙️ og lim inn tokenen fra deploy/config.local"
                     else -> "Serveren svarte med feil ${e.code()}"
                 }
                 RetrofitClient.reportAppError(

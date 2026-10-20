@@ -1,5 +1,7 @@
 package com.pepito.servidor.network
 
+import com.pepito.servidor.BuildConfig
+
 import com.google.gson.annotations.SerializedName
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
@@ -169,7 +171,7 @@ data class RegisterResponse(
 
 data class ErrorReportRequest(
     val error_message: String,
-    val source: String = "android_app_v2.0",
+    val source: String = "android_app_${BuildConfig.VERSION_NAME}",
     val endpoint: String = "",
     val status_code: Int = 0,
     val details: String = "",
@@ -314,7 +316,8 @@ object RetrofitClient {
         return null
     }
 
-    private var _baseUrl = "http://100.115.248.101:8000/"
+    // Ingen hardkodet serveradresse: lastes fra server_prefs eller settes paa login-skjermen.
+    private var _baseUrl = ""
     var BASE_URL: String
         get() = _baseUrl
         set(value) {
@@ -325,7 +328,8 @@ object RetrofitClient {
             }
         }
 
-    private var _apiToken: String = "servidor123"
+    // Ingen hardkodet API-token: lastes fra server_prefs eller settes paa login-skjermen.
+    private var _apiToken: String = ""
     var API_TOKEN: String
         get() = _apiToken
         set(value) {
@@ -365,6 +369,9 @@ object RetrofitClient {
     val api: ServerApiService
         get() {
             if (_api == null) {
+                if (_baseUrl.isEmpty()) {
+                    throw IllegalStateException("Serveradresse mangler - skriv den inn paa login-skjermen")
+                }
                 _api = Retrofit.Builder()
                     .baseUrl(_baseUrl)
                     .client(httpClient)
@@ -385,7 +392,7 @@ object RetrofitClient {
             api.reportError(
                 ErrorReportRequest(
                     error_message = message,
-                    source = "android_app_v2.0",
+                    source = "android_app_${BuildConfig.VERSION_NAME}",
                     endpoint = endpoint,
                     status_code = statusCode,
                     details = details,

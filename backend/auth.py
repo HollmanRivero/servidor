@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import time
 import uuid
@@ -15,6 +16,34 @@ import uuid
 from loguru import logger
 
 import database
+
+
+# --------------------------------------------------------------------------
+# Maskering av hemmeligheter i logger og feilloggen
+# --------------------------------------------------------------------------
+# Agenten har lesetilgang til filer og kan finne paa a gjengi innholdet i .env
+# i et svar. Uten dette havnet API-noklene i klartekst i journalen.
+_SECRET_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_-]{8,}"),
+    re.compile(r"AQ\.[A-Za-z0-9_-]{8,}"),
+    re.compile(r"tai_[A-Za-z0-9_-]{8,}"),
+    re.compile(r"AIza[A-Za-z0-9_-]{10,}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
+)
+_KEY_VALUE = re.compile(
+    r"(?i)\b(api[_-]?key|token|secret|password)\b(\s*[=:]\s*)([\'\"]?)([^\s\'\",}]{6,})"
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Maskerer API-nokler og KEY=verdi i tekst som skal logges."""
+    if not text:
+        return text
+    out = str(text)
+    for pattern in _SECRET_PATTERNS:
+        out = pattern.sub(lambda m: m.group(0)[:4] + "***", out)
+    out = _KEY_VALUE.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}***", out)
+    return out
 
 
 def _db():
@@ -192,8 +221,8 @@ def log_error(
     now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     uid = user.get("id") if user else None
     uname = (user.get("username") if user else None) or username or None
-    msg = (error_message or "Ukjent feil").strip()[:1000]
-    det = (details or "").strip()[:4000]
+    msg = redact_secrets((error_message or "Ukjent feil").strip())[:1000]
+    det = redact_secrets((details or "").strip())[:4000]
     try:
         db = _db()
         db.execute(

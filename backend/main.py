@@ -6,6 +6,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -22,7 +23,7 @@ try:
     from dotenv import load_dotenv
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, Response
     from loguru import logger
     from pydantic import BaseModel
 except ModuleNotFoundError as exc:
@@ -141,6 +142,29 @@ if ":" in _raw_host:
 HOST = _raw_host.strip() or "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8000"))
 
+
+def _can_bind(host: str) -> bool:
+    """Kan vi lytte på denne adressen akkurat nå?"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, 0))
+            return True
+        except OSError:
+            return False
+
+
+# HOST=100.x.y.z betyr "lytt kun pa Tailscale". Er Tailscale logget ut eller
+# nede, finnes ikke adressen, og uvicorn dorer med EADDRNOTAVAIL. Da starter
+# tjenesten pa nytt i det uendelige og serveren er helt nede. Fall derfor
+# tilbake til alle grensesnitt i stedet - en tilgjengelig server er bedre.
+if not _can_bind(HOST):
+    logger.warning(
+        "HOST={} finnes ikke pa denne maskinen (Tailscale nede eller feil IP) - lytter pa 0.0.0.0 i stedet",
+        HOST,
+    )
+    HOST = "0.0.0.0"
+
 # Shell- og agent-tilgang.
 AGENT_SHELL_ENABLED = os.environ.get("ENABLE_AGENT_SHELL", "1").strip().lower() in {
     "1", "true", "yes", "on",
@@ -152,6 +176,7 @@ MAX_OUTPUT_CHARS = 12000
 OPEN_PATHS = {
     "/",
     "/health",
+    "/favicon.ico",
     "/auth/login",
     "/auth/register",
     "/auth/forgot-password",
@@ -246,7 +271,10 @@ def _is_valid_token(supplied: str) -> bool:
 async def _run_and_log_errors(request: Request, call_next, current_user: dict | None, client: str):
     try:
         response = await call_next(request)
-        if response.status_code >= 400 and request.url.path not in {"/errors/report"}:
+        # Bare ekte serverfeil logges som feil. 4xx er normal validering
+        # (feil passord, duplikat brukernavn, utløpt kode, ukjent rute) og
+        # havner i access_logs i stedet - ellers fylles feilloggen av støy.
+        if response.status_code >= 500 and request.url.path not in {"/errors/report"}:
             auth.log_error(
                 error_message=f"HTTP {response.status_code} på {request.method} {request.url.path}",
                 source="backend",
@@ -294,14 +322,9 @@ async def check_token(request: Request, call_next):
         if _is_valid_token(supplied_api):
             return await _run_and_log_errors(request, call_next, None, client)
         status = state.get("status", 401)
+        # Avvist token er en klientfeil, ikke en serverfeil: den havner i access_logs
+        # med blocked_reason, og fyller ikke feilloggen i appen.
         auth.log_user_activity(request.url.path, None, client, allowed=False, blocked_reason=state.get("detail", ""))
-        auth.log_error(
-            error_message=state.get("detail", "Ingen tilgang"),
-            source="auth",
-            endpoint=f"{request.method} {request.url.path}",
-            status_code=status,
-            ip_address=client,
-        )
         return JSONResponse(status_code=status, content={"detail": state.get("detail", "Ingen tilgang")})
 
     # 2) Master-token (X-API-Token)
@@ -314,13 +337,6 @@ async def check_token(request: Request, call_next):
 
     logger.warning("Nektet {} {} fra {} (ugyldig token)", request.method, request.url.path, client)
     auth.log_user_activity(request.url.path, None, client, allowed=False, blocked_reason="Manglende token")
-    auth.log_error(
-        error_message="Token inválido o ausente",
-        source="auth",
-        endpoint=f"{request.method} {request.url.path}",
-        status_code=401,
-        ip_address=client,
-    )
     return JSONResponse(status_code=401, content={"detail": "Token inválido o ausente"})
 
 
@@ -525,6 +541,13 @@ def read_root():
         "version": "2.0",
         "os": OS_DESCRIPTION,
     }
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """Nettleseren ber alltid om denne. Uten ruten ble hvert sidevisning en
+    falsk 401 i feilloggen."""
+    return Response(status_code=204)
 
 
 @app.get("/health")
@@ -749,8 +772,8 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
 def _error_detail(exc: Exception) -> str:
     """Henter feiltekst fra et HTTPError-svar uten å eksponere API-nøkkelen i URL-en."""
     if isinstance(exc, urllib.error.HTTPError):
-        return f"HTTP {exc.code}: {_http_body(exc)[:300]}"
-    return str(exc)
+        return auth.redact_secrets(f"HTTP {exc.code}: {_http_body(exc)[:300]}")
+    return auth.redact_secrets(str(exc))
 
 
 def _http_body(exc: urllib.error.HTTPError) -> str:
@@ -1629,7 +1652,7 @@ def chat_agent(body: AgentTaskRequest):
             action_obj = _extract_json_object(raw_reply)
             if not action_obj:
                 consecutive_parse_errors += 1
-                logger.warning("Ugyldig JSON fra {} i steg {}: {!r}", author, step_num, raw_reply[:200])
+                logger.warning("Ugyldig JSON fra {} i steg {}: {!r}", author, step_num, auth.redact_secrets(raw_reply[:200]))
                 history_notes.append(
                     f"Steg {step_num}: Ditt forrige svar var ikke gyldig JSON. "
                     "Du MÅ svare med KUN ett JSON-objekt med feltene thought, action og done."
