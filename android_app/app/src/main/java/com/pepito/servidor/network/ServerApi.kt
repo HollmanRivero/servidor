@@ -117,6 +117,9 @@ data class AgentTaskResponse(
     val summary: String = "",
     val steps: List<AgentStepLog> = emptyList(),
     val pending_messages: List<String> = emptyList(),
+    val awaiting_input: Boolean = false,
+    val question: String = "",
+    val options: List<String> = emptyList(),
     val review: ReviewResult? = null
 )
 

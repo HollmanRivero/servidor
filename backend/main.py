@@ -1535,6 +1535,11 @@ VIKTIGE REGLER:
 4. Svar KORT. Hele svaret må være under ca. 1200 tegn. Skal du skrive en stor fil, skriv
    den i biter: første del med "write_file", resten med "append_file" i neste steg.
    Ellers blir JSON-en avkuttet og steget mislykkes.
+5. Er det flere fornuftige veier til målet og valget betyr noe (f.eks. hvilken port,
+   hvilken mappe, hvilken av to løsninger), stopp og bruk "ask_user" med 2-4 korte
+   alternativer. Ikke gjett når brukeren åpenbart har en mening.
+6. Brukeren kan sende nye meldinger mens du jobber. De står under «NYE MELDINGER FRA
+   BRUKEREN». Les dem, og juster planen hvis de endrer oppgaven.
 
 JSON-format (velg nøyaktig ett skjema per steg):
 - Skrive eller overskrive fil:
@@ -1557,6 +1562,9 @@ JSON-format (velg nøyaktig ett skjema per steg):
   {{"thought": "kort forklaring", "action": "copy_path", "path": "fra/sti", "dest": "til/sti", "done": false}}
 - Kjøre en hvilken som helst terminal/shell-kommando på serveren:
   {{"thought": "kort forklaring", "action": "run_command", "command": "kommando her", "done": false}}
+- Be brukeren velge når det finnes flere fornuftige veier (2-4 korte alternativer).
+  Bruk denne i stedet for å gjette når valget har betydning for resultatet:
+  {{"thought": "kort forklaring", "action": "ask_user", "question": "kort spørsmål", "options": ["alternativ 1", "alternativ 2", "alternativ 3"], "done": false}}
 - Når HELE oppgaven er utført, verifisert og testet uten feil:
   {{"thought": "alt er testet og verifisert", "action": "finish", "summary": "kort oppsummering på norsk av alt som ble gjort", "done": true}}
 """
@@ -1722,6 +1730,8 @@ def chat_agent(body: AgentTaskRequest):
 
     done = False
     summary = ""
+    awaiting_question = ""
+    awaiting_options: list[str] = []
     last_model: str | None = None
     last_step_failed = False
     consecutive_parse_errors = 0
@@ -1839,6 +1849,22 @@ def chat_agent(body: AgentTaskRequest):
                 "copy_path",
                 "run_command",
             }
+
+            if action in {"ask_user", "options", "propose_options"}:
+                # Agenten har funnet flere fornuftige veier. I stedet for a
+                # gjette, stopper den og lar brukeren velge.
+                question = str(action_obj.get("question") or thought or "Hvilken vei vil du ga?").strip()
+                raw_options = action_obj.get("options") or action_obj.get("choices") or []
+                options: list[str] = []
+                if isinstance(raw_options, list):
+                    options = [str(o).strip() for o in raw_options if str(o).strip()][:4]
+                awaiting_question = question
+                awaiting_options = options
+                step_entry["action"] = "ask_user"
+                step_entry["result"] = question + ((" | " + " / ".join(options)) if options else "")
+                steps_log.append(step_entry)
+                history_notes.append(f"Steg {step_num}: spurte brukeren om veivalg: {question}")
+                break
 
             if action == "finish" or (wants_done and action not in all_file_actions):
                 # Brukeren kan ha skrevet noe mens vi jobbet. Da skal vi IKKE
@@ -2181,6 +2207,9 @@ def chat_agent(body: AgentTaskRequest):
             "steps": steps_log,
             "user_messages": int(_agent_state.get("user_messages", 0)),
             "pending_messages": leftover,
+            "awaiting_input": bool(awaiting_question),
+            "question": awaiting_question,
+            "options": awaiting_options,
             "review": review_obj,
         }
     except Exception as exc:

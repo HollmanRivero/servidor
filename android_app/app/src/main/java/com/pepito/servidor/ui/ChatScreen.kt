@@ -32,6 +32,9 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
     var selectedAI by remember { mutableStateOf("Gemini") }
     var collaborateMode by remember { mutableStateOf(false) }
     var agentMode by remember { mutableStateOf(true) }
+    var choiceQuestion by remember { mutableStateOf("") }
+    var choiceOptions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var lastAgentGoal by remember { mutableStateOf("") }
     var projectName by remember { mutableStateOf("servidor") }
     var availableProjects by remember { mutableStateOf(listOf("servidor", "~")) }
     var messages by remember {
@@ -151,6 +154,17 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                                 false,
                                 result.primary.ifBlank { selectedAI }
                             )
+                            if (result.awaiting_input && result.options.isNotEmpty()) {
+                                choiceQuestion = result.question.ifBlank { "Hvilken vei vil du gå?" }
+                                choiceOptions = result.options
+                                lastAgentGoal = finalPrompt
+                                messages = messages + ChatMessage(
+                                    "❓ $choiceQuestion\n\nVelg ett av alternativene under.",
+                                    false,
+                                    "agenten spør"
+                                )
+                                break
+                            }
                             result.review?.let { rev ->
                                 val badge = when (rev.verdict.uppercase()) {
                                     "FEIL" -> "⚠️ Fant feil"
@@ -409,6 +423,26 @@ fun ChatScreen(onNavigateBack: () -> Unit) {
                             else -> selectedAI
                         }
                         Text("$whoTalks jobber...", color = Color.Gray, modifier = Modifier.padding(8.dp))
+                    }
+                }
+            }
+
+            if (choiceOptions.isNotEmpty()) {
+                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    choiceOptions.forEach { option ->
+                        Button(
+                            onClick = {
+                                val chosen = option
+                                val question = choiceQuestion
+                                val goal = lastAgentGoal
+                                choiceOptions = emptyList()
+                                choiceQuestion = ""
+                                sendMessage("Svar på «$question»: $chosen\n\nFortsett oppgaven: $goal")
+                            },
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            Text(option, style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
             }
