@@ -574,6 +574,11 @@ def health():
         "deepseek_key_configured": bool(DEEPSEEK_API_KEY),
         "techai_key_configured": bool(TECH_AI_API_KEY),
         "ai_providers": [p.key for p in AGENT_PROVIDERS.values() if p.configured],
+        "ai_providers_paused": {
+            key: int(_PROVIDER_COOLDOWN[key] - time.monotonic())
+            for key in AGENT_PROVIDERS
+            if not _provider_available(key)
+        },
         "agent_shell_enabled": AGENT_SHELL_ENABLED,
         "tailscale_configured": bool(TAILSCALE_AUTH_KEY),
         "agent_running": _agent_state.get("running", False),
@@ -675,8 +680,8 @@ def read_file(path: str):
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
     try:
         content = target_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        raise HTTPException(status_code=400, detail="El archivo no se pudo leer")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="El archivo no se pudo leer") from e
     return {"content": content}
 
 
@@ -882,7 +887,7 @@ def _ask_gemini(prompt: str, json_mode: bool = False) -> tuple[str, str]:
                     raise RuntimeError(
                         f"Gemini avviser API-nøkkelen (HTTP {e.code}). "
                         f"Sjekk GEMINI_API_KEY i backend/.env. {detail}"
-                    )
+                    ) from e
                 # Hvis en modell ikke støtter responseMimeType, prøv samme modell uten
                 if e.code == 400 and json_mode and "responseMimeType" in payload_to_send.get("generationConfig", {}):
                     payload_to_send = {
@@ -1061,6 +1066,7 @@ def _ask_techai(prompt: str, json_mode: bool = False) -> tuple[str, str]:
             problems.append(f"{url.split('//')[-1]}: {_error_detail(e)}")
             continue
 
+    _mark_provider_down("techai", problems[0] if problems else "ukjent feil")
     raise RuntimeError("Tech-AI svarte ikke. " + " | ".join(problems[:3]))
 
 
@@ -1098,7 +1104,9 @@ def chat_techai(body: ChatRequest):
     if not user_message:
         return {"reply": "Hei! Jeg er Tech-AI. Hva skal vi bygge i dag?"}
 
-    if TECH_AI_API_KEY or os.environ.get("TECH_AI_API_URL"):
+    # Er Tech-AI kjent nede (502/kvote), hopp over det direkte kallet og gå rett
+    # på fallback. Ellers venter hver forespørsel på en tjeneste som er nede.
+    if (TECH_AI_API_KEY or os.environ.get("TECH_AI_API_URL")) and _provider_available("techai"):
         try:
             text, _model = _ask_techai(user_message)
             return {"reply": text}
@@ -1275,6 +1283,31 @@ AGENT_PROVIDERS: dict[str, AgentProvider] = {
 }
 
 
+# Nar en leverandor feiler (kvote, 502, tidsavbrudd) skal vi ikke prove den pa
+# nytt for hver eneste foresporsel. Da venter brukeren pa dode tjenester hver gang.
+_PROVIDER_COOLDOWN: dict[str, float] = {}
+PROVIDER_COOLDOWN_SECONDS = float(os.environ.get("PROVIDER_COOLDOWN_SECONDS", "300"))
+
+
+def _provider_available(key: str) -> bool:
+    return _PROVIDER_COOLDOWN.get(key, 0.0) <= time.monotonic()
+
+
+def _mark_provider_down(key: str, reason: object) -> None:
+    _PROVIDER_COOLDOWN[key] = time.monotonic() + PROVIDER_COOLDOWN_SECONDS
+    logger.warning("{} settes pa pause i {}s ({})", key, int(PROVIDER_COOLDOWN_SECONDS), str(reason)[:120])
+
+
+def _first_available_provider(preferred: str) -> str:
+    """Bruk den foretrukne agenten hvis den virker, ellers en som virker na."""
+    if preferred in AGENT_PROVIDERS and _provider_available(preferred):
+        return preferred
+    for key, provider in AGENT_PROVIDERS.items():
+        if provider.configured and _provider_available(key):
+            return key
+    return preferred
+
+
 def _normalize_agent(name: str) -> str:
     low = (name or "").strip().lower()
     for provider in AGENT_PROVIDERS.values():
@@ -1300,18 +1333,24 @@ def _ask_agent(key: str, prompt: str, json_mode: bool = False) -> tuple[str, str
     faller den automatisk tilbake til en av de andre konfigurerte AI-agentene slik at
     oppgaver aldri stopper!"""
     primary = AGENT_PROVIDERS.get(key) or AGENT_PROVIDERS["gemini"]
-    try:
-        return primary.ask(prompt, json_mode)
-    except Exception as primary_err:
-        for name in primary.fallbacks:
-            other = AGENT_PROVIDERS.get(name)
-            if not other or not other.configured:
-                continue
-            logger.warning(
-                "{} feilet ({}), faller tilbake til {}...", primary.label, primary_err, other.label
-            )
-            return other.ask(prompt, json_mode)
-        raise
+    order = [primary.key] + list(primary.fallbacks)
+    problems: list[str] = []
+
+    for name in order:
+        provider = AGENT_PROVIDERS.get(name)
+        if not provider or not provider.configured:
+            continue
+        if not _provider_available(name):
+            problems.append(f"{provider.label}: pa pause")
+            continue
+        try:
+            return provider.ask(prompt, json_mode)
+        except Exception as err:
+            problems.append(f"{provider.label}: {str(err)[:100]}")
+            _mark_provider_down(name, err)
+            logger.warning("{} feilet ({}), prover neste agent", provider.label, str(err)[:160])
+
+    raise RuntimeError("Ingen AI-agent svarte. " + " | ".join(problems[:4]))
 
 
 def _server_context() -> str:
@@ -1591,7 +1630,8 @@ def chat_agent(body: AgentTaskRequest):
     if not goal:
         raise HTTPException(status_code=400, detail="Mål (goal) mangler")
 
-    chosen_agent = body.primary or body.agent or "gemini"
+    default_primary = body.primary or body.agent or "gemini"
+    chosen_agent = _first_available_provider(_normalize_agent(default_primary))
     primary_key = _normalize_agent(chosen_agent)
     reviewer_key = "deepseek" if primary_key == "gemini" else "gemini"
     author = _agent_label(primary_key)
@@ -2068,7 +2108,7 @@ def auth_register(body: RegisterRequest, request: Request):
     try:
         user = auth.create_user(username, body.password, body.email)
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
     client_ip = request.client.host if request.client else ""
     auth.log_user_activity("/auth/register", user, client_ip, allowed=True)
     return {"id": user["id"], "username": user["username"], "role": user["role"]}
@@ -2108,8 +2148,8 @@ def auth_me(request: Request):
         raise HTTPException(status_code=401, detail="Ingen token.")
     try:
         payload = auth.decode_token(auth_header[7:].strip())
-    except Exception:
-        raise HTTPException(status_code=401, detail="Ugyldig eller utløpt token.")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Ugyldig eller utløpt token.") from e
     user = auth.get_user_by_id(payload.get("sub"))
     if not user:
         raise HTTPException(status_code=404, detail="Brukeren finnes ikke.")
