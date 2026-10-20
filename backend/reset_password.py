@@ -4,15 +4,19 @@
 Kjores av administratoren pa serveren. Serveren har ingen e-postutsending, sa
 koden ma gis til brukeren pa annen mate (SMS, Signal, si det ansikt til ansikt).
 
-    cd backend
-    ../.venv/bin/python reset_password.py --user kari
-    ../.venv/bin/python reset_password.py --user "Hollman Rivero"
-    ../.venv/bin/python reset_password.py --list
-    ../.venv/bin/python reset_password.py --find kari
-    ../.venv/bin/python reset_password.py --user kari --set-passord nyttpassord
+    cd ~/Dokumenter/MyGits/servidor/servidor          (repo-roten, ikke backend/)
+    .venv/bin/python backend/reset_password.py --user kari
+    .venv/bin/python backend/reset_password.py --user "Hollman Rivero"
+    .venv/bin/python backend/reset_password.py --list
+    .venv/bin/python backend/reset_password.py --find kari
+    .venv/bin/python backend/reset_password.py --user kari --set-passord nyttpassord
 
-Bruk ALLTID ../.venv/bin/python. System-python mangler pakkene, og sudo gir deg
-en annen brukers hjemmemappe og feil database.
+Bruk ALLTID prosjektets .venv. System-python mangler pakkene, og sudo gir deg en
+annen brukers hjemmemappe og feil database.
+
+Tips: skriv stien uten ".." (altsa fra repo-roten). "cd backend" + "../.venv/bin/python"
+virker, men Python 3.14 skriver da to RuntimeWarning-linjer om sys.prefix fordi
+".." staar i stien. Det er ikke en feil i skriptet, bare stoy.
 
 Engangskoden er gyldig i RESET_CODE_MINUTES minutter (standard 30), kan bare
 brukes en gang, og lagres kun som hash.
@@ -29,9 +33,8 @@ except ModuleNotFoundError as exc:
     raise SystemExit(
         f"\nMangler Python-pakken '{exc.name}'.\n"
         "Du kjorer system-python (eller sudo) i stedet for prosjektets .venv.\n\n"
-        "  Riktig:\n"
-        "      cd backend\n"
-        "      ../.venv/bin/python reset_password.py --user \"Ditt Navn\"\n\n"
+        "  Riktig (fra repo-roten):\n"
+        "      .venv/bin/python backend/reset_password.py --user \"Ditt Navn\"\n\n"
         "  Feil (virker ikke):\n"
         "      sudo python3 reset_password.py --user Ditt Navn\n"
     ) from None

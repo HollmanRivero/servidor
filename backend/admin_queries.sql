@@ -33,16 +33,17 @@
 -- SOKE ETTER BRUKERE:
 --   sqlite3 data/memory.db "SELECT username, role, is_banned FROM users WHERE username LIKE '%kari%';"
 --   eller uten sqlite3 i det hele tatt:
---   ../.venv/bin/python reset_password.py --find kari
---   ../.venv/bin/python reset_password.py --list
+--   .venv/bin/python backend/reset_password.py --find kari
+--   .venv/bin/python backend/reset_password.py --list
 --
 -- TIPS: skriv alltid WHERE pa UPDATE/DELETE. Uten WHERE treffer det alle rader.
 -- Ta en kopi forst hvis du er usikker (fra backend/):  cp data/memory.db data/memory.db.bak
 --
 -- Passord kan du ikke lese ut (de er hashet). Glemt passord?
---   ../.venv/bin/python reset_password.py --user <navn>              (engangskode)
---   ../.venv/bin/python reset_password.py --user <navn> --set-passord <nytt>
---   ../.venv/bin/python reset_password.py --list                     (alle brukere)
+--   .venv/bin/python backend/reset_password.py --user <navn>            (engangskode)
+--   .venv/bin/python backend/reset_password.py --user <navn> --set-passord <nytt>
+--   .venv/bin/python backend/reset_password.py --list                   (alle brukere)
+--   (kjoeres fra repo-roten - ikke fra backend/ - for a slippe RuntimeWarning)
 -- ================================================================
 
 
