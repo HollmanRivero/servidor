@@ -2,6 +2,8 @@ package com.pepito.servidor.ui
 
 import android.content.Context
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
@@ -43,6 +45,7 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
     var resetNewPassword by remember { mutableStateOf("") }
     var resetError by remember { mutableStateOf<String?>(null) }
     var resetInfo by remember { mutableStateOf<String?>(null) }
+    var resetLoading by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("server_prefs", Context.MODE_PRIVATE) }
@@ -191,10 +194,10 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
             onDismissRequest = { showReset = false },
             title = { Text("Glemt passord") },
             text = {
-                Column {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                     Text(
-                        "Be administratoren om en engangskode. " +
-                            "Han lager den på serveren med: python reset_password.py --user <navn>"
+                        "Be administratoren om en engangskode (6 siffer). Den er gyldig i 30 minutter.",
+                        style = MaterialTheme.typography.bodySmall
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(
@@ -233,12 +236,15 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     TextButton(
+                        enabled = !resetLoading,
                         onClick = {
                             if (resetUser.isBlank()) {
                                 resetError = "Skriv inn brukernavnet ditt"
                                 return@TextButton
                             }
                             resetError = null
+                            resetInfo = null
+                            resetLoading = true
                             scope.launch {
                                 try {
                                     val resp = RetrofitClient.api.forgotPassword(
@@ -246,51 +252,71 @@ fun LoginScreen(onLoggedIn: () -> Unit) {
                                     )
                                     resetInfo = resp.message
                                 } catch (e: Exception) {
-                                    resetError = "Kunne ikke kontakte serveren (${e.message})"
+                                    resetError = "Kunne ikke kontakte serveren: ${e.message}"
+                                } finally {
+                                    resetLoading = false
                                 }
                             }
                         }
                     ) {
                         Text("Jeg har ikke fått noen kode ennå", color = NeonBlue)
                     }
+                    if (resetLoading) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Kontakter serveren …", style = MaterialTheme.typography.bodySmall, color = NeonBlue)
+                        }
+                    }
                 }
             },
             confirmButton = {
-                Button(onClick = {
-                    if (resetUser.isBlank() || resetCode.isBlank()) {
-                        resetError = "Fyll inn brukernavn og engangskode"
-                        return@Button
-                    }
-                    if (resetNewPassword.length < 4) {
-                        resetError = "Nytt passord må ha minst 4 tegn"
-                        return@Button
-                    }
-                    resetError = null
-                    resetInfo = null
-                    scope.launch {
-                        try {
-                            val resp = RetrofitClient.api.resetPassword(
-                                ResetPasswordRequest(
-                                    resetUser.trim(),
-                                    resetCode.trim(),
-                                    resetNewPassword
+                Button(
+                    enabled = !resetLoading,
+                    onClick = {
+                        if (resetUser.isBlank() || resetCode.isBlank()) {
+                            resetError = "Fyll inn brukernavn og engangskode"
+                            return@Button
+                        }
+                        if (resetNewPassword.length < 4) {
+                            resetError = "Nytt passord må ha minst 4 tegn"
+                            return@Button
+                        }
+                        resetError = null
+                        resetInfo = null
+                        resetLoading = true
+                        scope.launch {
+                            try {
+                                val resp = RetrofitClient.api.resetPassword(
+                                    ResetPasswordRequest(
+                                        resetUser.trim(),
+                                        resetCode.trim(),
+                                        resetNewPassword
+                                    )
                                 )
-                            )
-                            username = resetUser.trim()
-                            password = ""
-                            error = resp.message.ifBlank { "Passordet er endret. Logg inn." }
-                            showReset = false
-                        } catch (e: HttpException) {
-                            resetError = when (e.code()) {
-                                400 -> "Feil eller utløpt kode. Be om en ny."
-                                else -> "Serveren svarte med feil ${e.code()}"
+                                username = resetUser.trim()
+                                password = ""
+                                error = resp.message.ifBlank { "Passordet er endret. Logg inn." }
+                                showReset = false
+                            } catch (e: HttpException) {
+                                resetError = when (e.code()) {
+                                    400 -> "Feil eller utløpt kode. Be om en ny."
+                                    else -> "Serveren svarte med feil ${e.code()}"
+                                }
+                            } catch (e: Exception) {
+                                resetError = "Kunne ikke kontakte serveren: ${e.message}"
+                            } finally {
+                                resetLoading = false
                             }
-                        } catch (e: Exception) {
-                            resetError = "Kunne ikke kontakte serveren (${e.message})"
                         }
                     }
-                }) {
-                    Text("Bytt passord")
+                ) {
+                    if (resetLoading) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(if (resetLoading) "Sender …" else "Bytt passord")
                 }
             },
             dismissButton = {

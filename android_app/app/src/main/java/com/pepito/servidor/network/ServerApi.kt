@@ -349,7 +349,7 @@ object RetrofitClient {
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(600, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
             .addInterceptor { chain ->
